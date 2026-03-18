@@ -1,0 +1,19 @@
+# 1. Ignore EVERYTHING in this directory by default
+/*
+
+# 2. Allowlist the specific folders you want to track
+!adxl367/
+!bme688/
+!bmi270/
+!npm1300/
+!scan/
+
+# 3. Allowlist this .gitignore file so it gets pushed to GitHub
+!.gitignore
+
+# 4. CRITICAL: Ignore all Zephyr build artifacts inside your allowed folders
+adxl367/build/
+bme688/build/
+bmi270/build/
+npm1300/build/
+scan/build/

@@ -1,0 +1,9 @@
+/* Turn on the I2C2 bus where the sensor lives */
+&i2c2 {
+    status = "okay";
+};
+
+/* Turn on the BME680 node and keep the GUI's suggested initialization delay */
+&bme680 {
+    status = "okay";
+};

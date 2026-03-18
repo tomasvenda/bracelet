@@ -1,0 +1,9 @@
+/* Enable the main PMIC */
+&pmic_main {
+    status = "okay";
+};
+
+/* Enable the charger node inside the PMIC */
+&npm1300_charger {
+    status = "okay";
+};

@@ -1,0 +1,10 @@
+/* Turn on the Low-Power IMU (ADXL367) */
+&accelerometer_lp {
+    status = "okay";
+};
+
+/* If your ADXL367 is on a specific bus (like I2C2 or SPI3), ensure that bus is also enabled. 
+   For example, if it's on SPI3 like the BMI270: */
+&spi3 {
+    status = "okay";
+};
