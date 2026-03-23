@@ -7,6 +7,7 @@
 !bmi270/
 !npm1300/
 !scan/
+!server_com/
 
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
@@ -17,3 +18,7 @@ bme688/build/
 bmi270/build/
 npm1300/build/
 scan/build/
+
+# Ignore the contents of the build directory except the dfu_application.zip
+server_com/build/*
+!server_com/build/dfu_application.zip

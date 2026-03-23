@@ -1,0 +1,31 @@
+#
+# Copyright (c) 2020 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+menu "Communication with MQTT broker"
+
+config MQTT_PUB_TOPIC
+	string "MQTT publish topic"
+	default "bracelet/prototype_1/data"	#The prototype_1 will be replaced by a unique ID
+
+# config MQTT_SUB_TOPIC
+# 	 string "MQTT subscribe topic"
+# 	 default "bracelet/subscribe/"
+
+config MQTT_CLIENT_ID
+	string "MQTT Client ID"
+	help
+	 	Use a custom Client ID string. If not set, the client ID will be
+	  	generated based on the IMEI number (for nRF91 Series based targets) or
+	  	randomly (for other platforms).
+# I think we can keep it like this to automatically generate the client ID
+
+config MQTT_BROKER_HOSTNAME
+	string "MQTT broker Azure Bracelet Server"
+	default "20.251.201.46"
+
+endmenu
+
+source "Kconfig.zephyr"
