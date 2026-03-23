@@ -1,0 +1,8 @@
+&accelerometer_lp {
+    status = "okay";
+    int1-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>; 
+};
+
+&spi3 {
+    status = "okay";
+};
