@@ -92,3 +92,24 @@ config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHz_NON_DFS_CHAN
 endchoice
 
 endmenu
+
+
+menu "Communication with MQTT broker"
+
+config MQTT_PUB_TOPIC
+    string "MQTT publish topic"
+    default "bracelet/prototype_1/data" 
+    help
+      The prototype_1 will be replaced by a unique ID later.
+
+config MQTT_CLIENT_ID
+    string "MQTT Client ID"
+    help
+      Use a custom Client ID string. If not set, the client ID will be
+      generated automatically.
+
+config MQTT_BROKER_HOSTNAME
+    string "MQTT broker Azure Bracelet Server"
+    default "20.251.201.46"
+
+endmenu

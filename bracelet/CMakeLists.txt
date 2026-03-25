@@ -15,4 +15,5 @@ target_sources(app PRIVATE
     src/localization_wifi.c
     src/low_power_acl.c
     src/data_manager.c
+    src/lte_service.c
 )

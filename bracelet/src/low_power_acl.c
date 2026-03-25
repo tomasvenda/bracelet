@@ -7,84 +7,60 @@
 
 LOG_MODULE_REGISTER(low_power_acl, LOG_LEVEL_INF);
 
-// Define the global event object here 
+/* The global event object that the WiFi thread listens to */
 K_EVENT_DEFINE(app_events);
 
-// Timeout
 #define INACTIVITY_TIMEOUT_S 30
 
-// Forward declaration of timer callback 
 static void inactivity_timer_handler(struct k_timer *timer_id);
-
-// Define the RTOS timer
 K_TIMER_DEFINE(inactivity_timer, inactivity_timer_handler, NULL);
 
-// THE GO-TO-SLEEP HANDLER (Runs when the timer expires)
+/* CRITICAL FIX: The trigger struct MUST be static so it survives in memory forever! */
+static struct sensor_trigger trig;
 
+/* 1. Timer expires -> User is asleep -> Clear flag */
 static void inactivity_timer_handler(struct k_timer *timer_id)
 {
     LOG_INF("No movement for %d seconds. System going to sleep...", INACTIVITY_TIMEOUT_S);
-    
-    // Clear the flag. This tells the WiFi thread to pause!
     k_event_clear(&app_events, EVENT_USER_MOVING);
 }
 
-// THE HARDWARE INTERRUPT HANDLER (Runs the microsecond the sensor moves)
- 
+/* 2. Hardware interrupt fires -> User is moving -> Set flag */
 static void adxl367_trigger_handler(const struct device *dev, const struct sensor_trigger *trigger)
 {
-    /* We only care about motion triggers */
-    if (trigger->type == SENSOR_TRIG_MOTION || trigger->type == SENSOR_TRIG_DELTA) {
-        
-        /* If we weren't already moving, announce it and set the flag! */
-        if ((k_event_test(&app_events, EVENT_USER_MOVING) & EVENT_USER_MOVING) == 0) {
-            LOG_INF("Hardware Interrupt: Movement detected! Waking system...");
-            k_event_post(&app_events, EVENT_USER_MOVING);
-        }
+    /* Since we fixed the memory pointer, we don't even need to check the trigger type. 
+     * If this function runs, we know the ADXL367 physical pin fired! 
+     */
+    uint32_t current_state = k_event_test(&app_events, EVENT_USER_MOVING);
 
-        /* Reset the inactivity timer back to 30 seconds */
-        k_timer_start(&inactivity_timer, K_SECONDS(INACTIVITY_TIMEOUT_S), K_NO_WAIT);
+    /* If the system was asleep, wake it up! */
+    if ((current_state & EVENT_USER_MOVING) == 0) {
+        LOG_INF("Movement detected! Waking system...");
+        k_event_post(&app_events, EVENT_USER_MOVING);
     }
+
+    /* Every time we move, reset the 30-second sleep timer */
+    k_timer_start(&inactivity_timer, K_SECONDS(INACTIVITY_TIMEOUT_S), K_NO_WAIT);
 }
 
-// INITIALIZATION function to set up the ADXL367 and its interrupt at boot
- 
+/* 3. Setup function called by main.c */
 int low_power_acl_init(void)
 {
     const struct device *const dev = DEVICE_DT_GET_ONE(adi_adxl367);
-    struct sensor_value full_scale, threshold;
-
     if (!device_is_ready(dev)) {
-        LOG_ERR("ADXL367 is not ready! Check Devicetree overlay.");
+        LOG_ERR("ADXL367 is not ready! Check Devicetree.");
         return -ENODEV;
     }
 
-    /* Set scale to 2G */
-    full_scale.val1 = 2;            
-    full_scale.val2 = 0;
-    sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_FULL_SCALE, &full_scale);
-    
-    /* Configure the hardware motion threshold (e.g., 1 m/s^2) 
-       This tells the physical ADXL chip how hard it needs to be bumped to fire the interrupt */
-    threshold.val1 = 1; 
-    threshold.val2 = 0;
-    sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_UPPER_THRESH, &threshold);
+    /* Configure our permanent static trigger */
+    trig.type = SENSOR_TRIG_THRESHOLD;
+    trig.chan = SENSOR_CHAN_ACCEL_XYZ;
 
-    /* Set up the Trigger */
-    struct sensor_trigger trig = {
-        .type = SENSOR_TRIG_MOTION, /* Or SENSOR_TRIG_DELTA, depending on Zephyr driver version */
-        .chan = SENSOR_CHAN_ACCEL_XYZ,
-    };
-
-    /* Attach our callback function to the hardware interrupt */
     if (sensor_trigger_set(dev, &trig, adxl367_trigger_handler) < 0) {
-        LOG_ERR("Could not set ADXL367 trigger! Did you configure int1-gpios in the overlay?");
+        LOG_ERR("Could not set ADXL367 trigger!");
         return -EIO;
     }
 
-    LOG_INF("ADXL367 Hardware Interrupts configured successfully.");
+    LOG_INF("ADXL367 Hardware Watchdog armed!");
     return 0;
 }
-
-/* Zephyr macro to run this initialization automatically at boot */
-SYS_INIT(low_power_acl_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

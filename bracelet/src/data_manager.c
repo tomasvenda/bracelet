@@ -6,27 +6,24 @@
 
 LOG_MODULE_REGISTER(data_manager, LOG_LEVEL_INF);
 
-/* Create a mailbox that can hold up to 20 WiFi scan results at a time */
-K_MSGQ_DEFINE(wifi_data_queue, sizeof(struct wifi_msg_t), 20, 4);
+/* Mailbox for our batches. We only need space for a few since they are processed instantly */
+K_MSGQ_DEFINE(wifi_data_queue, sizeof(struct wifi_batch_msg_t), 5, 4);
 
-void data_manager_send_wifi_result(const char *ssid, int rssi, const char *mac)
+void data_manager_send_wifi_batch(struct ap_data_t *aps, uint8_t count)
 {
-    struct wifi_msg_t msg;
-
-    /* Safely copy the data into our message structure */
-    strncpy(msg.ssid, ssid, sizeof(msg.ssid) - 1);
-    msg.ssid[sizeof(msg.ssid) - 1] = '\0';
+    struct wifi_batch_msg_t msg;
     
-    strncpy(msg.mac, mac, sizeof(msg.mac) - 1);
-    msg.mac[sizeof(msg.mac) - 1] = '\0';
+    msg.ap_count = count;
+    
+    /* Copy the array of APs into our message */
+    for (int i = 0; i < count; i++) {
+        strncpy(msg.aps[i].mac, aps[i].mac, sizeof(msg.aps[i].mac) - 1);
+        msg.aps[i].mac[sizeof(msg.aps[i].mac) - 1] = '\0';
+        msg.aps[i].rssi = aps[i].rssi;
+    }   
 
-    msg.rssi = rssi;
-
-    /* Put the message into the queue. 
-     * K_NO_WAIT means if the queue is perfectly full (20 items), 
-     * we just drop this result rather than freezing the WiFi thread. 
-     */
+    /* Ship the batch to main.c */
     if (k_msgq_put(&wifi_data_queue, &msg, K_NO_WAIT) != 0) {
-        LOG_WRN("WiFi data queue is full! Dropping result.");
+        LOG_WRN("WiFi data queue is full! Dropping batch.");
     }
 }

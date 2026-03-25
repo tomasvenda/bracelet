@@ -1,19 +1,26 @@
 #ifndef DATA_MANAGER_H
 #define DATA_MANAGER_H
 
+#include <stdint.h>
 #include <zephyr/kernel.h>
 
-/* The structure of the message we will send to the main thread */
-struct wifi_msg_t {
-    char ssid[33];   /* Max SSID length is 32 + null terminator */
-    char mac[18];    /* MAC address string "xx:xx:xx:xx:xx:xx" + null */
+#define MAX_APS_PER_SCAN 10
+
+/* Structure for a single Access Point */
+struct ap_data_t {
+    char mac[18];
     int rssi;
 };
 
-/* The Zephyr Message Queue (Mailbox) */
+/* The new Batch Message Structure */
+struct wifi_batch_msg_t {
+    uint8_t ap_count;
+    struct ap_data_t aps[MAX_APS_PER_SCAN];
+};
+
 extern struct k_msgq wifi_data_queue;
 
-/* Function for the WiFi thread to push data into the queue */
-void data_manager_send_wifi_result(const char *ssid, int rssi, const char *mac);
+/* New function signature to send the whole batch at once */
+void data_manager_send_wifi_batch(struct ap_data_t *aps, uint8_t count);
 
-#endif /* DATA_MANAGER_H */
+#endif
