@@ -25,30 +25,36 @@ int main(void)
         LOG_INF("Interrupt setup SUCCESSFUL! Waiting for movement...");
     }
 
-    struct wifi_batch_msg_t rx_msg;
+    struct location_msg_t rx_msg;
     char json_payload[1024]; 
 
     while (1) {
-        if (k_msgq_get(&wifi_data_queue, &rx_msg, K_FOREVER) == 0) {
+        if (k_msgq_get(&location_queue, &rx_msg, K_FOREVER) == 0) {
+            memset(json_payload, 0, sizeof(json_payload));
             
-            /* Start building the JSON payload in nRF Cloud "wifi" format */
-            int offset = snprintf(json_payload, sizeof(json_payload), 
-                                  "{\"wifi\":{\"accessPoints\":[");
-
-            for (int i = 0; i < rx_msg.ap_count; i++) {
-                const char *comma = (i == rx_msg.ap_count - 1) ? "" : ",";
-
-                /* nRF Cloud uses 'macAddress' and 'signalStrength' */
-                offset += snprintf(json_payload + offset, sizeof(json_payload) - offset,
-                                   "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s",
-                                   rx_msg.aps[i].mac, rx_msg.aps[i].rssi, comma);
+            if (rx_msg.type == LOC_TYPE_WIFI) {
+                int offset = snprintf(json_payload, sizeof(json_payload), "{\"wifi\":{\"accessPoints\":[");
+                for (int i = 0; i < rx_msg.data.wifi.count; i++) {
+                    const char *comma = (i == rx_msg.data.wifi.count - 1) ? "" : ",";
+                    offset += snprintf(json_payload + offset, sizeof(json_payload) - offset,
+                                       "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s",
+                                       rx_msg.data.wifi.aps[i].mac, rx_msg.data.wifi.aps[i].rssi, comma);
+                }
+                snprintf(json_payload + offset, sizeof(json_payload) - offset, "]}}");
+            } 
+            else if (rx_msg.type == LOC_TYPE_GNSS) {
+                snprintf(json_payload, sizeof(json_payload), 
+                         "{\"gnss\":{\"lat\":%.6f,\"lng\":%.6f,\"acc\":%.1f}}",
+                         rx_msg.data.gnss.lat, rx_msg.data.gnss.lon, rx_msg.data.gnss.accuracy);
+            }
+            else if (rx_msg.type == LOC_TYPE_CELL) {
+                snprintf(json_payload, sizeof(json_payload),
+                         "{\"lte\":{\"mcc\":%d,\"mnc\":%d,\"cellId\":%d,\"areaCode\":%d}}",
+                         rx_msg.data.cell.mcc, rx_msg.data.cell.mnc, 
+                         rx_msg.data.cell.cell_id, rx_msg.data.cell.area_code);
             }
 
-            /* Close the JSON structure */
-            snprintf(json_payload + offset, sizeof(json_payload) - offset, "]}}");
-
-            LOG_INF("Publishing nRF Cloud Format (%d bytes)", strlen(json_payload));
-            
+            LOG_INF("Publishing Location Payload: %s", json_payload);
             lte_mqtt_publish_str(json_payload);
         }
     }

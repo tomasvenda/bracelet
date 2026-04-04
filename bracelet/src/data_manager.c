@@ -6,24 +6,52 @@
 
 LOG_MODULE_REGISTER(data_manager, LOG_LEVEL_INF);
 
-/* Mailbox for our batches. We only need space for a few since they are processed instantly */
-K_MSGQ_DEFINE(wifi_data_queue, sizeof(struct wifi_batch_msg_t), 5, 4);
+/* Generic location queue for Wi-Fi, GNSS, or Cell data */
+K_MSGQ_DEFINE(location_queue, sizeof(struct location_msg_t), 5, 4);
 
-void data_manager_send_wifi_batch(struct ap_data_t *aps, uint8_t count)
+void data_manager_send_wifi(struct ap_data_t *aps, uint8_t count)
 {
-    struct wifi_batch_msg_t msg;
-    
-    msg.ap_count = count;
-    
-    /* Copy the array of APs into our message */
-    for (int i = 0; i < count; i++) {
-        strncpy(msg.aps[i].mac, aps[i].mac, sizeof(msg.aps[i].mac) - 1);
-        msg.aps[i].mac[sizeof(msg.aps[i].mac) - 1] = '\0';
-        msg.aps[i].rssi = aps[i].rssi;
-    }   
+    struct location_msg_t msg;
 
-    /* Ship the batch to main.c */
-    if (k_msgq_put(&wifi_data_queue, &msg, K_NO_WAIT) != 0) {
-        LOG_WRN("WiFi data queue is full! Dropping batch.");
+    msg.type = LOC_TYPE_WIFI;
+    msg.data.wifi.count = count;
+
+    for (int i = 0; i < count; i++) {
+        strncpy(msg.data.wifi.aps[i].mac, aps[i].mac, sizeof(msg.data.wifi.aps[i].mac) - 1);
+        msg.data.wifi.aps[i].mac[sizeof(msg.data.wifi.aps[i].mac) - 1] = '\0';
+        msg.data.wifi.aps[i].rssi = aps[i].rssi;
+    }
+
+    if (k_msgq_put(&location_queue, &msg, K_NO_WAIT) != 0) {
+        LOG_WRN("Location queue full! Dropping Wi-Fi data.");
+    }
+}
+
+void data_manager_send_gnss(double lat, double lon, float accuracy)
+{
+    struct location_msg_t msg;
+    
+    msg.type = LOC_TYPE_GNSS;
+    msg.data.gnss.lat = lat;
+    msg.data.gnss.lon = lon;
+    msg.data.gnss.accuracy = accuracy;
+
+    if (k_msgq_put(&location_queue, &msg, K_NO_WAIT) != 0) {
+        LOG_WRN("Location queue full! Dropping GNSS data.");
+    }
+}
+
+void data_manager_send_cell(uint16_t mcc, uint16_t mnc, uint32_t cell_id, uint16_t area_code)
+{
+    struct location_msg_t msg;
+
+    msg.type = LOC_TYPE_CELL;
+    msg.data.cell.mcc = mcc;
+    msg.data.cell.mnc = mnc;
+    msg.data.cell.cell_id = cell_id;
+    msg.data.cell.area_code = area_code;
+
+    if (k_msgq_put(&location_queue, &msg, K_NO_WAIT) != 0) {
+        LOG_WRN("Location queue full! Dropping Cell data.");
     }
 }

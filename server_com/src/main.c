@@ -257,6 +257,8 @@ int main(void)
 		if (err) {
 			LOG_WRN("Failed to publish message %d", i);
 		}
+		
+		i++;
 	}
 
 	return 0;

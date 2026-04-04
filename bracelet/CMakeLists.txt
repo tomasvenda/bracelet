@@ -12,7 +12,7 @@ zephyr_include_directories(src/include)
 
 target_sources(app PRIVATE 
     src/main.c
-    src/localization_wifi.c
+    src/localization.c
     src/low_power_acl.c
     src/data_manager.c
     src/lte_service.c
