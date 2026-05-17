@@ -1,6 +1,147 @@
-#include <thingy91x_wifi.dtsi>
 
-&accelerometer_lp {
+&pinctrl {
+    /* UART0: TX=P0.00, RX=P0.01 */
+    uart0_default: uart0_default {
+        group1 {
+            psels = <NRF_PSEL(UART_TX, 0, 0)>,
+                    <NRF_PSEL(UART_RX, 0, 1)>;
+        };
+    };
+
+    /* I2C: SCL=P0.08, SDA=P0.09 */
+    i2c1_default: i2c1_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 8)>;
+        };
+    };
+
+    /* SPI: SCK=P0.13, MOSI=P0.14, MISO=P0.15 */
+    spi3_default: spi3_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 13)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 14)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 15)>;
+        };
+    };
+
+    /* PWM for RGB LED & Buzzer */
+    pwm0_default: pwm0_default {
+        group1 {
+            /* RED=P0.28, GREEN=P0.29, BLUE=P0.30, BUZZER=P0.31 */
+            psels = <NRF_PSEL(PWM_OUT0, 0, 28)>,
+                    <NRF_PSEL(PWM_OUT1, 0, 29)>,
+                    <NRF_PSEL(PWM_OUT2, 0, 30)>,
+                    <NRF_PSEL(PWM_OUT3, 0, 31)>;
+        };
+    };
+};
+
+&i2c1 {
     status = "okay";
-    int1-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>; 
+    pinctrl-0 = <&i2c1_default>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_FAST>;
+
+    /* nPM1300 PMIC */
+    npm1300: pmic@6b {
+        compatible = "nordic,npm1300";
+        reg = <0x6b>;
+        
+        npm1300_regulators: regulators {
+            compatible = "nordic,npm1300-regulator";
+        };
+    };
+
+    /* ST LSM6DSO Accelerometer/Gyro */
+    lsm6dso: lsm6dso@6a {
+        compatible = "st,lsm6dso";
+        reg = <0x6a>; /* 1101010b in hex */
+        /* INT1 is on P0.02 */
+        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
+    };
+
+    /* TDK Barometer */
+    icp20100: icp20100@63 {
+        compatible = "invensense,icp20100";
+        reg = <0x63>; 
+        /* INT_BARO is on P0.04 */
+        int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+    };
+};
+
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_default>;
+    pinctrl-names = "default";
+    
+    /* CS_FLASH is P0.10, CS_NRF70 is P0.12 */
+    cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>,
+               <&gpio0 12 GPIO_ACTIVE_LOW>;
+
+    /* NOR Flash */
+    mx25u64: flash@0 {
+        compatible = "jedec,spi-nor";
+        reg = <0>; /* Matches the first CS pin (P0.10) */
+        spi-max-frequency = <8000000>;
+        size = <67108864>;
+        jedec-id = [c2 25 37];
+    };
+    
+    /* Wi-Fi Companion (nRF7002) */
+    nrf7002: wifi@1 {
+        compatible = "nordic,nrf7002-spi";
+        reg = <1>; /* Matches the second CS pin (P0.12) */
+        /* WIFI_HOST_IRQ is P0.16, WIFI_ENABLE is P0.17 */
+        irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+        bucken-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+        spi-max-frequency = <8000000>;
+    };
+};
+
+/ {
+    aliases {
+        sw0 = &button_em;
+        buzzer = &pwm_buzzer;
+    };
+
+    buttons {
+        compatible = "gpio-keys";
+        button_em: button_0 {
+            gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Emergency Button";
+        };
+    };
+
+    /* Display Control Pins */
+    display_ctrl {
+        compatible = "gpio-leds"; 
+        disp_reset: disp_reset {
+            gpios = <&gpio0 23 GPIO_ACTIVE_LOW>; /* P0.23 */
+        };
+        disp_power_en: disp_power_en {
+            gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>; /* P0.26 */
+        };
+    };
+
+    /* Buzzer PWM routing */
+    pwm_buzzer: pwm_buzzer {
+        compatible = "pwm-beeper";
+        pwms = <&pwm0 3 PWM_HZ(4000) PWM_POLARITY_NORMAL>; /* P0.31 is Channel 3 */
+    };
+};
+
+/* Enable UART0 */
+&uart0 {
+    status = "okay";
+    pinctrl-0 = <&uart0_default>;
+    pinctrl-names = "default";
+    current-speed = <115200>;
+};
+
+/* Enable PWM0 */
+&pwm0 {
+    status = "okay";
+    pinctrl-0 = <&pwm0_default>;
+    pinctrl-names = "default";
 };

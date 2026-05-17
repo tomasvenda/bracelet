@@ -113,3 +113,21 @@ config MQTT_BROKER_HOSTNAME
     default "20.251.201.46"
 
 endmenu
+
+menu "Fall Detection & Sensor Settings"
+
+config FALL_DETECT_G_THRESHOLD
+    int "High-G Threshold for Fall Detection"
+    default 25
+    help
+      The G-force threshold (in raw sensor units or m/s^2 depending on your app math) 
+      that triggers a suspected fall event from the LSM6DSO.
+
+config FALL_DETECT_TIME_WINDOW_MS
+    int "Time window to confirm fall (ms)"
+    default 2000
+    help
+      How long to wait after a high-G impact to check the Barometer 
+      for a pressure/altitude drop.
+
+endmenu
