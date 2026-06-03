@@ -109,8 +109,16 @@ config MQTT_CLIENT_ID
       generated automatically.
 
 config MQTT_BROKER_HOSTNAME
-    string "MQTT broker Azure Bracelet Server"
+    string "MQTT broker Azure Server"
     default "20.251.201.46"
+    help
+      WARNING: Avoid static IPs for production. Use a domain name.
+
+config MQTT_BROKER_PORT
+    int "MQTT broker port"
+    default 1883
+    help
+      Standard TCP is 1883. Secure TLS/SSL is usually 8883.
 
 endmenu
 
@@ -121,7 +129,7 @@ config FALL_DETECT_G_THRESHOLD
     default 25
     help
       The G-force threshold (in raw sensor units or m/s^2 depending on your app math) 
-      that triggers a suspected fall event from the LSM6DSO.
+      that triggers a suspected fall event from the Bosch BMI270.
 
 config FALL_DETECT_TIME_WINDOW_MS
     int "Time window to confirm fall (ms)"
@@ -129,5 +137,17 @@ config FALL_DETECT_TIME_WINDOW_MS
     help
       How long to wait after a high-G impact to check the Barometer 
       for a pressure/altitude drop.
+
+endmenu
+
+menu "Finite State Machine & Tracking Timers"
+
+config FSM_ACTIVE_TRACKING_TIMER_S
+    int "Active Tracking Timer (Seconds)"
+    default 180
+    help
+      When the user is moving > 50m, how frequently (in seconds) should 
+      the device scan Wi-Fi and send via LTE before checking the IMU again.
+
 
 endmenu

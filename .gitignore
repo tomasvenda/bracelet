@@ -24,3 +24,6 @@ bracelet/build/
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*
 !server_com/build/dfu_application.zip
+
+# Ignore TODO
+todo.txt

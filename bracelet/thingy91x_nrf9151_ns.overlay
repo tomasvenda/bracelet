@@ -1,4 +1,3 @@
-
 &pinctrl {
     /* UART0: TX=P0.00, RX=P0.01 */
     uart0_default: uart0_default {
@@ -48,25 +47,50 @@
         compatible = "nordic,npm1300";
         reg = <0x6b>;
         
+        /* MCU P0.18 is wired to PMIC GPIO0. This acts as the Host Interrupt */
+        host-int-gpios = <&gpio0 18 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        
         npm1300_regulators: regulators {
             compatible = "nordic,npm1300-regulator";
+            
+            /* LSOUT1 (Pin 29) powers the Wi-Fi Enable */
+            npm1300_ldo1: LDO1 {
+                regulator-name = "nRF7002_ENABLE";
+            };
+            
+            /* LSOUT2 (Pin 31) powers the BMI270 IMU */
+            npm1300_ldo2: LDO2 {
+                regulator-name = "VIN_BMI270";
+            };
         };
     };
 
-    /* ST LSM6DSO Accelerometer/Gyro */
-    lsm6dso: lsm6dso@6a {
-        compatible = "st,lsm6dso";
-        reg = <0x6a>; /* 1101010b in hex */
-        /* INT1 is on P0.02 */
-        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
+    /* Bosch BMI270 IMU */
+    bmi270: bmi270@68 {
+        compatible = "bosch,bmi270";
+        reg = <0x68>;
+        int1-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
     };
 
     /* TDK Barometer */
     icp20100: icp20100@63 {
         compatible = "invensense,icp20100";
         reg = <0x63>; 
-        /* INT_BARO is on P0.04 */
         int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+    };
+
+    /* OLED Display */
+    ssd1306: ssd1306@3c {
+        compatible = "solomon,ssd1306fb";
+        reg = <0x3c>; 
+        width = <128>;
+        height = <64>;
+        segment-offset = <0>;
+        page-offset = <0>;
+        display-offset = <0>;
+        multiplex-ratio = <63>;
+        prechargep = <0x22>;
+        reset-gpios = <&gpio0 23 GPIO_ACTIVE_LOW>; 
     };
 };
 
@@ -75,26 +99,24 @@
     pinctrl-0 = <&spi3_default>;
     pinctrl-names = "default";
     
-    /* CS_FLASH is P0.10, CS_NRF70 is P0.12 */
     cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>,
                <&gpio0 12 GPIO_ACTIVE_LOW>;
 
-    /* NOR Flash */
-    mx25u64: flash@0 {
+    /* NOR Flash (32Mb) */
+    mx25u32: flash@0 {
         compatible = "jedec,spi-nor";
-        reg = <0>; /* Matches the first CS pin (P0.10) */
+        reg = <0>; 
         spi-max-frequency = <8000000>;
-        size = <67108864>;
-        jedec-id = [c2 25 37];
+        size = <33554432>;
+        jedec-id = [c2 25 36];
     };
     
     /* Wi-Fi Companion (nRF7002) */
     nrf7002: wifi@1 {
         compatible = "nordic,nrf7002-spi";
-        reg = <1>; /* Matches the second CS pin (P0.12) */
-        /* WIFI_HOST_IRQ is P0.16, WIFI_ENABLE is P0.17 */
+        reg = <1>; 
+        /* bucken-gpios removed: Wi-Fi enable is handled by PMIC LDO1 */
         irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
-        bucken-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
         spi-max-frequency = <8000000>;
     };
 };
@@ -103,6 +125,10 @@
     aliases {
         sw0 = &button_em;
         buzzer = &pwm_buzzer;
+        led0 = &led_red;
+        led1 = &led_green;
+        led2 = &led_blue;
+        pmic-gpio1 = &mcu_to_pmic_gpio1;
     };
 
     buttons {
@@ -113,21 +139,46 @@
         };
     };
 
-    /* Display Control Pins */
+    /* Custom Routing */
+    custom_gpios {
+        compatible = "gpio-leds"; 
+        
+        /* MCU P0.19 wired to PMIC GPIO1 */
+        mcu_to_pmic_gpio1: mcu_to_pmic_gpio1 {
+            gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+            label = "MCU to PMIC GPIO1";
+        };
+    };
+
+    /* Display Power Control Pin */
     display_ctrl {
         compatible = "gpio-leds"; 
-        disp_reset: disp_reset {
-            gpios = <&gpio0 23 GPIO_ACTIVE_LOW>; /* P0.23 */
-        };
         disp_power_en: disp_power_en {
-            gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>; /* P0.26 */
+            gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>; 
+            label = "OLED Power Enable";
         };
     };
 
     /* Buzzer PWM routing */
     pwm_buzzer: pwm_buzzer {
         compatible = "pwm-beeper";
-        pwms = <&pwm0 3 PWM_HZ(4000) PWM_POLARITY_NORMAL>; /* P0.31 is Channel 3 */
+        pwms = <&pwm0 3 PWM_HZ(4000) PWM_POLARITY_NORMAL>; 
+    };
+
+    pwmleds {
+        compatible = "pwm-leds";
+        led_red: led_pwm_0 {
+            pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+            label = "Red LED";
+        };
+        led_green: led_pwm_1 {
+            pwms = <&pwm0 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+            label = "Green LED";
+        };
+        led_blue: led_pwm_2 {
+            pwms = <&pwm0 2 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+            label = "Blue LED";
+        };
     };
 };
 
