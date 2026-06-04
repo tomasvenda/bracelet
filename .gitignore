@@ -9,7 +9,11 @@
 !scan/
 !server_com/
 !bracelet
-
+!barometer
+!accelerometer
+!wifi
+!button_led_buzzer
+!display
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
 
@@ -20,6 +24,11 @@ bmi270/build/
 npm1300/build/
 scan/build/
 bracelet/build/
+barometer/build/
+accelerometer/build/
+wifi/build/
+button_led_buzzer/build/
+display/build/
 
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*

@@ -1,21 +1,35 @@
 &pinctrl {
-    /* UART0: TX=P0.00, RX=P0.01 */
+    /* --- UART0 --- */
     uart0_default: uart0_default {
         group1 {
             psels = <NRF_PSEL(UART_TX, 0, 0)>,
                     <NRF_PSEL(UART_RX, 0, 1)>;
         };
     };
+    uart0_sleep: uart0_sleep {
+        group1 {
+            psels = <NRF_PSEL(UART_TX, 0, 0)>,
+                    <NRF_PSEL(UART_RX, 0, 1)>;
+            low-power-enable;
+        };
+    };
 
-    /* I2C: SCL=P0.08, SDA=P0.09 */
+    /* --- I2C1 --- */
     i2c1_default: i2c1_default {
         group1 {
             psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
                     <NRF_PSEL(TWIM_SCL, 0, 8)>;
         };
     };
+    i2c1_sleep: i2c1_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 8)>;
+            low-power-enable;
+        };
+    };
 
-    /* SPI: SCK=P0.13, MOSI=P0.14, MISO=P0.15 */
+    /* --- SPI3 --- */
     spi3_default: spi3_default {
         group1 {
             psels = <NRF_PSEL(SPIM_SCK, 0, 13)>,
@@ -23,8 +37,16 @@
                     <NRF_PSEL(SPIM_MISO, 0, 15)>;
         };
     };
+    spi3_sleep: spi3_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 13)>,
+                    <NRF_PSEL(SPIM_MOSI, 0, 14)>,
+                    <NRF_PSEL(SPIM_MISO, 0, 15)>;
+            low-power-enable;
+        };
+    };
 
-    /* PWM for RGB LED & Buzzer */
+    /* --- PWM0 --- */
     pwm0_default: pwm0_default {
         group1 {
             /* RED=P0.28, GREEN=P0.29, BLUE=P0.30, BUZZER=P0.31 */
@@ -34,47 +56,55 @@
                     <NRF_PSEL(PWM_OUT3, 0, 31)>;
         };
     };
+    pwm0_sleep: pwm0_sleep {
+        group1 {
+            psels = <NRF_PSEL(PWM_OUT0, 0, 28)>,
+                    <NRF_PSEL(PWM_OUT1, 0, 29)>,
+                    <NRF_PSEL(PWM_OUT2, 0, 30)>,
+                    <NRF_PSEL(PWM_OUT3, 0, 31)>;
+            low-power-enable;
+        };
+    };
 };
 
 &i2c1 {
     status = "okay";
     pinctrl-0 = <&i2c1_default>;
-    pinctrl-names = "default";
+    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-names = "default", "sleep";
     clock-frequency = <I2C_BITRATE_FAST>;
 
-    /* nPM1300 PMIC */
     npm1300: pmic@6b {
         compatible = "nordic,npm1300";
         reg = <0x6b>;
-        
-        /* MCU P0.18 is wired to PMIC GPIO0. This acts as the Host Interrupt */
-        host-int-gpios = <&gpio0 18 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
-        
+        status = "okay"; /* Enable the PMIC parent */
+
         npm1300_regulators: regulators {
             compatible = "nordic,npm1300-regulator";
-            
-            /* LSOUT1 (Pin 29) powers the Wi-Fi Enable */
+            status = "okay"; /* Enable the regulator subsystem */
+
             npm1300_ldo1: LDO1 {
-                regulator-name = "nRF7002_ENABLE";
+                regulator-boot-on;
             };
-            
-            /* LSOUT2 (Pin 31) powers the BMI270 IMU */
+
             npm1300_ldo2: LDO2 {
-                regulator-name = "VIN_BMI270";
+                regulator-boot-on;
             };
         };
+
     };
+    
 
     /* Bosch BMI270 IMU */
     bmi270: bmi270@68 {
         compatible = "bosch,bmi270";
         reg = <0x68>;
-        int1-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
+        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
     };
 
     /* TDK Barometer */
     icp20100: icp20100@63 {
-        compatible = "invensense,icp20100";
+        compatible = "invensense,icp201xx"; 
         reg = <0x63>; 
         int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
     };
@@ -97,7 +127,8 @@
 &spi3 {
     status = "okay";
     pinctrl-0 = <&spi3_default>;
-    pinctrl-names = "default";
+    pinctrl-1 = <&spi3_sleep>;
+    pinctrl-names = "default", "sleep";
     
     cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>,
                <&gpio0 12 GPIO_ACTIVE_LOW>;
@@ -115,9 +146,20 @@
     nrf7002: wifi@1 {
         compatible = "nordic,nrf7002-spi";
         reg = <1>; 
-        /* bucken-gpios removed: Wi-Fi enable is handled by PMIC LDO1 */
-        irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+        bucken-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+        host-irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
         spi-max-frequency = <8000000>;
+
+        /* TX Power Limits (Required for RF Regulatory Compliance) */
+        wifi-max-tx-pwr-2g-dsss = <16>;
+        wifi-max-tx-pwr-2g-mcs0 = <16>;
+        wifi-max-tx-pwr-2g-mcs7 = <15>;
+        wifi-max-tx-pwr-5g-low-mcs0 = <14>;
+        wifi-max-tx-pwr-5g-low-mcs7 = <13>;
+        wifi-max-tx-pwr-5g-mid-mcs0 = <14>;
+        wifi-max-tx-pwr-5g-mid-mcs7 = <13>;
+        wifi-max-tx-pwr-5g-high-mcs0 = <14>;
+        wifi-max-tx-pwr-5g-high-mcs7 = <13>;
     };
 };
 
@@ -186,7 +228,8 @@
 &uart0 {
     status = "okay";
     pinctrl-0 = <&uart0_default>;
-    pinctrl-names = "default";
+    pinctrl-1 = <&uart0_sleep>;
+    pinctrl-names = "default", "sleep";
     current-speed = <115200>;
 };
 
@@ -194,5 +237,6 @@
 &pwm0 {
     status = "okay";
     pinctrl-0 = <&pwm0_default>;
-    pinctrl-names = "default";
+    pinctrl-1 = <&pwm0_sleep>;
+    pinctrl-names = "default", "sleep";
 };
