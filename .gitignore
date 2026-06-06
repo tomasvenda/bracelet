@@ -14,6 +14,8 @@
 !wifi
 !button_led_buzzer
 !display
+!final_project/
+
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
 
@@ -29,6 +31,7 @@ accelerometer/build/
 wifi/build/
 button_led_buzzer/build/
 display/build/
+final_project/build/
 
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*
