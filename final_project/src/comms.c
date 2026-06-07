@@ -36,7 +36,7 @@ static K_SEM_DEFINE(mqtt_connected_sem, 0, 1);
 
 /* Fallback broker definition if not defined in Kconfig */
 #ifndef CONFIG_MQTT_BROKER_HOSTNAME
-#define CONFIG_MQTT_BROKER_HOSTNAME "your-broker-address.com"
+#define CONFIG_MQTT_BROKER_HOSTNAME "20.251.201.46"
 #endif
 
 static bool mqtt_is_connected = false;
