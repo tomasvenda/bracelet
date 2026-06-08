@@ -96,58 +96,34 @@ endmenu
 
 menu "Communication with MQTT broker"
 
+config MQTT_BOOTSTRAP_SECURITY_CODE
+    string "MQTT bootstrap security code"
+    default "987654"
+    help
+        Security code sent in the first MQTT message after the initial connect.
+
+config MQTT_BOOTSTRAP_BATTERY
+    int "MQTT bootstrap battery percentage"
+    default 95
+    range 0 100
+    help
+        Battery percentage sent in the first MQTT message after the initial connect.
+
 config MQTT_PUB_TOPIC
     string "MQTT publish topic"
     default "bracelet/prototype_1/data" 
     help
-      The prototype_1 will be replaced by a unique ID later.
+        The prototype_1 will be replaced by a unique ID later.
 
-config MQTT_CLIENT_ID
-    string "MQTT Client ID"
+config MQTT_SUB_TOPIC
+    string "MQTT subscribe topic"
+    default "bracelet/prototype_1/response"
     help
-      Use a custom Client ID string. If not set, the client ID will be
-      generated automatically.
+        Topic this device subscribes to in order to receive responses.
 
 config MQTT_BROKER_HOSTNAME
-    string "MQTT broker Azure Server"
+    string "MQTT broker Azure Bracelet Server"
     default "20.251.201.46"
-    help
-      WARNING: Avoid static IPs for production. Use a domain name.
-
-config MQTT_BROKER_PORT
-    int "MQTT broker port"
-    default 1883
-    help
-      Standard TCP is 1883. Secure TLS/SSL is usually 8883.
-
-endmenu
-
-menu "Fall Detection & Sensor Settings"
-
-config FALL_DETECT_G_THRESHOLD
-    int "High-G Threshold for Fall Detection"
-    default 25
-    help
-      The G-force threshold (in raw sensor units or m/s^2 depending on your app math) 
-      that triggers a suspected fall event from the Bosch BMI270.
-
-config FALL_DETECT_TIME_WINDOW_MS
-    int "Time window to confirm fall (ms)"
-    default 2000
-    help
-      How long to wait after a high-G impact to check the Barometer 
-      for a pressure/altitude drop.
-
-endmenu
-
-menu "Finite State Machine & Tracking Timers"
-
-config FSM_ACTIVE_TRACKING_TIMER_S
-    int "Active Tracking Timer (Seconds)"
-    default 180
-    help
-      When the user is moving > 50m, how frequently (in seconds) should 
-      the device scan Wi-Fi and send via LTE before checking the IMU again.
 
 
 endmenu

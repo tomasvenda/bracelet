@@ -1,5 +1,6 @@
 #include <zephyr/kernel.h>              
 #include <zephyr/logging/log.h>         
+#include <stdio.h>
 #include <string.h>                     
 
 #include <modem/nrf_modem_lib.h> 
@@ -7,28 +8,63 @@
 #include <net/mqtt_helper.h> 
 
 #include "lte_service.h"
+#include "app_events.h"
 
 LOG_MODULE_REGISTER(lte_service, LOG_LEVEL_INF);
+
+#ifndef CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE
+#define CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE "987654"
+#endif
+
+#ifndef CONFIG_MQTT_BOOTSTRAP_BATTERY
+#define CONFIG_MQTT_BOOTSTRAP_BATTERY 95
+#endif
 
 static K_SEM_DEFINE(lte_connected, 0, 1);               
 static K_SEM_DEFINE(mqtt_connected_sem, 0, 1);
 static bool mqtt_is_connected = false;
+static bool bootstrap_message_sent = false;
 
 #define CLIENT_ID_LEN sizeof("prototype_1")
 static uint8_t client_id[CLIENT_ID_LEN] = "prototype_1";
+
+// This is the topic we will subscribe to, defined in KConfig
+static struct mqtt_topic sub_topic = {
+    .topic = {
+        .utf8 = (uint8_t *)CONFIG_MQTT_SUB_TOPIC,
+        .size = strlen(CONFIG_MQTT_SUB_TOPIC),
+    },
+    .qos = MQTT_QOS_1_AT_LEAST_ONCE,
+};
+
+// This is the list of topics which is expected by the mqtt_helper_subscribe() function
+static struct mqtt_subscription_list sub_list = {
+    .list       = &sub_topic,
+    .list_count = 1,
+    .message_id = 1,   // any non-zero ID is fine for testing
+};
 
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
      switch (evt->type) {
      case LTE_LC_EVT_NW_REG_STATUS:
-        if ((evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME) &&
-            (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING)) {
-            break;
+        if ((evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME) ||
+            (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+            
+            LOG_INF("Connected to LTE network!");
+            k_sem_give(&lte_connected);
+            
+        } else if (evt->nw_reg_status == LTE_LC_NW_REG_REGISTRATION_DENIED) {
+            LOG_ERR("Network rejected us! Turning off modem to prevent FPLMN lock.");
+            
+            // Turn off the modem to stop it from spamming towers
+            lte_lc_offline(); 
+            
+            // Wait 2 minutes before trying again (allowing network bans to clear)
+            LOG_INF("Waiting 2 minutes before trying again to allow network bans to clear.");
+            k_sleep(K_MINUTES(2)); 
+            lte_lc_normal(); 
         }
-        LOG_INF("Network registration status: %s",
-                evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ?
-                "Connected - home network" : "Connected - roaming");
-        k_sem_give(&lte_connected);
         break;
      default:
              break;
@@ -53,10 +89,33 @@ static void on_mqtt_disconnect(int result)
     mqtt_is_connected = false;
 }
 
-static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf payload)
+// This is called when the Broker publishes a message on the topic(s) we are subscribed to, not that intuitive naming I know
+static void on_mqtt_publish(struct mqtt_helper_buf topic,
+                            struct mqtt_helper_buf payload)
 {
-    LOG_INF("Received unexpected payload: %.*s on topic: %.*s", 
-        payload.size, payload.ptr, topic.size, topic.ptr);
+    /* Log raw payload and topic for debugging */
+    LOG_INF("MQTT RX: %.*s  |  topic: %.*s",
+            payload.size, payload.ptr,
+            topic.size, topic.ptr);
+
+    /* Copy payload into a null-terminated buffer */
+    char buf[64];
+    size_t len = MIN((size_t)payload.size, sizeof(buf) - 1);
+    memcpy(buf, payload.ptr, len);
+    buf[len] = '\0';
+
+    //LOG_INF("MQTT RX (parsed): %s", buf);
+
+    /* Map payload to app_events for localization.c */
+    if (strcmp(buf, "wifi_successful") == 0) {
+        LOG_INF("Server says Wi-Fi localization SUCCESS");
+        k_event_post(&app_events, EVENT_SERVER_WIFI_SUCCESS);
+    } else if (strcmp(buf, "wifi_failed") == 0) {
+        LOG_INF("Server says Wi-Fi localization FAILED");
+        k_event_post(&app_events, EVENT_SERVER_WIFI_FAIL);
+    } else {
+        LOG_WRN("Unknown Wi-Fi response payload: %s", buf);
+    }
 }
 
 static int mqtt_ensure_connected(void)
@@ -110,6 +169,24 @@ static int mqtt_ensure_connected(void)
     return 0;
 }
 
+static int lte_mqtt_publish_bootstrap(void)
+{
+    char payload[128];
+
+    LOG_INF("Publishing bootstrap mqtt message.");
+
+    int written = snprintf(payload, sizeof(payload),
+                           "{\"security_code\":\"%s\",\"battery\":%d,\"status\":\"ok\"}",
+                           CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE,
+                           CONFIG_MQTT_BOOTSTRAP_BATTERY);
+    if (written < 0 || written >= sizeof(payload)) {
+        LOG_ERR("Failed to format bootstrap MQTT payload");
+        return -ENOMEM;
+    }
+
+    return lte_mqtt_publish_str(payload);
+}
+
 int lte_mqtt_publish_str(const char *payload)
 {
     if (mqtt_ensure_connected() != 0) {
@@ -136,6 +213,7 @@ int lte_mqtt_publish_str(const char *payload)
     return 0;
 }
 
+// The function that we call from main to setup all network communications
 int lte_mqtt_init(void)
 {
     int err;
@@ -144,7 +222,7 @@ int lte_mqtt_init(void)
     err = nrf_modem_lib_init();
     if (err) return err;
     
-    LOG_INF("Connecting to LTE network... (This may take a few seconds)");
+    LOG_INF("Connecting to LTE network...");
     err = lte_lc_connect_async(lte_handler);                        
     if (err) return err;
 
@@ -182,6 +260,24 @@ int lte_mqtt_init(void)
     if (k_sem_take(&mqtt_connected_sem, K_SECONDS(20)) != 0) {
         LOG_ERR("Initial MQTT connection failed!");
         return -ETIMEDOUT;
+    }
+
+    // Subscribing to the response topic 
+    LOG_INF("Subscribing to MQTT topic: %s", CONFIG_MQTT_SUB_TOPIC);
+    err = mqtt_helper_subscribe(&sub_list);
+    if (err) {
+        LOG_ERR("Failed to subscribe, err %d", err);
+    return err;
+    }
+
+    if (!bootstrap_message_sent) {
+        err = lte_mqtt_publish_bootstrap();
+        if (err) {
+            LOG_ERR("Failed to publish bootstrap MQTT payload: %d", err);
+            return err;
+        }
+
+        bootstrap_message_sent = true;
     }
     
     return 0;

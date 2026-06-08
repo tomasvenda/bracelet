@@ -10,6 +10,8 @@
 extern struct k_event app_events;
 
 /* Event Flags */
-#define EVENT_USER_MOVING BIT(0)
+#define EVENT_USER_MOVING         BIT(0)
+#define EVENT_SERVER_WIFI_SUCCESS BIT(1)
+#define EVENT_SERVER_WIFI_FAIL    BIT(2)
 
 #endif /* APP_EVENTS_H */

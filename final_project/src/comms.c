@@ -34,6 +34,22 @@ static K_SEM_DEFINE(mqtt_connected_sem, 0, 1);
 #define MQTT_TOPIC "bracelet/prototype_1/data"
 #define CLIENT_ID "prototype_1"
 
+#define MQTT_SUB_TOPIC "bracelet/prototype_1/response"
+/* List of topics the MQTT helper will subscribe to */
+static struct mqtt_topic sub_topic = {
+    .topic = {
+        .utf8 = (uint8_t *)MQTT_SUB_TOPIC,
+        .size = sizeof(MQTT_SUB_TOPIC) - 1,
+    },
+    .qos = MQTT_QOS_1_AT_LEAST_ONCE,
+};
+
+static struct mqtt_subscription_list sub_list = {
+    .list = &sub_topic,
+    .list_count = 1,
+    .message_id = 1234
+};
+
 /* Fallback broker definition if not defined in Kconfig */
 #ifndef CONFIG_MQTT_BROKER_HOSTNAME
 #define CONFIG_MQTT_BROKER_HOSTNAME "20.251.201.46"
@@ -138,18 +154,34 @@ static void on_mqtt_disconnect(int result)
 
 static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf payload)
 {
-    struct bracelet_event event;
-    LOG_INF("Received JSON from server: %.*s", payload.size, payload.ptr);
+    /* Convert payload to a null-terminated string for easy comparison */
+    char buf[64] = {0};
+    size_t len = MIN((size_t)payload.size, sizeof(buf) - 1);
+    memcpy(buf, payload.ptr, len);
+
+    LOG_INF("MQTT RX: %s  |  topic: %.*s", buf, topic.size, topic.ptr);
     
-    if (strstr(payload.ptr, "\"status\":\"stationary\"")) {
+    /* 1. Localization Responses (via k_event) */
+    if (strcmp(buf, "wifi_successful") == 0) {
+        k_event_post(&app_events, EVENT_SERVER_WIFI_SUCCESS);
+        return;
+    } 
+    else if (strcmp(buf, "wifi_failed") == 0) {
+        k_event_post(&app_events, EVENT_SERVER_WIFI_FAIL);
+        return;
+    }
+
+    /* 2. ZBUS FSM Events (if the payload is JSON) */
+    struct bracelet_event event;
+    if (strstr(buf, "\"status\":\"stationary\"")) {
         event.type = EVENT_SERVER_REPLY_STATIONARY;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     } 
-    else if (strstr(payload.ptr, "\"status\":\"moved\"")) {
+    else if (strstr(buf, "\"status\":\"moved\"")) {
         event.type = EVENT_SERVER_REPLY_MOVED;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     }
-    else if (strstr(payload.ptr, "\"ack\":true")) {
+    else if (strstr(buf, "\"ack\":true")) {
         event.type = EVENT_SERVER_ACK_ALERT;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     }
@@ -261,22 +293,60 @@ static void perform_localization_work(struct k_work *work)
         gpio_pin_set_dt(&pmic_wifi_en, 0); 
     }
 
-    if (aps >= 3) {
+        if (aps >= 3) {
         LOG_INF("Wi-Fi sufficient. Reactivating LTE...");
         lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
         
+        /* Build the Wi-Fi Payload */
         offset = snprintf(payload, sizeof(payload), 
             "{\"status\":\"%s\", \"battery\":%d, \"wifi\":{\"accessPoints\":[", current_status, batt);
-        
         for (int i = 0; i < aps; i++) {
             offset += snprintf(payload + offset, sizeof(payload) - offset, 
                 "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s", 
                 best_aps[i].mac, best_aps[i].rssi, (i < aps - 1) ? "," : "");
         }
         snprintf(payload + offset, sizeof(payload) - offset, "]}}");
-    } 
+        
+        /* 1. Publish immediately */
+        LOG_INF("Publishing Wi-Fi Payload: %s", payload);
+        lte_mqtt_publish_str(payload);
+
+        /* 2. Set up event waiting logic */
+        bool wifi_successful = false;
+        
+        /* Clear any stale flags from previous runs */
+        k_event_clear(&app_events, EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL);
+        
+        /* Block the thread for up to 10 seconds */
+        uint32_t events = k_event_wait(
+            &app_events,
+            EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL,
+            false,
+            K_SECONDS(10)
+        );
+
+        /* 3. Evaluate the result */
+        if (events & EVENT_SERVER_WIFI_SUCCESS) {
+            wifi_successful = true;
+            LOG_INF("Server confirmed Wi-Fi localization -> Ending pipeline.");
+        } else if (events & EVENT_SERVER_WIFI_FAIL) {
+            LOG_INF("Server rejected Wi-Fi data.");
+        } else {
+            LOG_INF("Server response timeout (10s).");
+        }
+
+        /* 4. If successful, end the function completely */
+        if (wifi_successful) {
+            current_status = "ok";
+            return; 
+        }
+    }
+
     else {
-        LOG_INF("Wi-Fi failed. Trying GNSS...");
+        /* If we reach here, Wi-Fi failed, timed out, or had < 3 APs */
+        LOG_INF("Wi-Fi failed or timed out. Suspending LTE for GNSS...");
+        lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+
         /* STEP 2: GNSS */
         if (do_gnss_fix() == 0) {
             LOG_INF("GNSS Fix acquired. Reactivating LTE...");
@@ -400,6 +470,14 @@ int comms_init(void)
     if (k_sem_take(&mqtt_connected_sem, K_SECONDS(20)) != 0) {
         LOG_ERR("Initial MQTT connection failed!");
         return -ETIMEDOUT;
+    }
+
+    // Subscribing to the responses topic
+    LOG_INF("Subscribing to %s...", MQTT_SUB_TOPIC);
+    err = mqtt_helper_subscribe(&sub_list);
+    if (err) {
+        LOG_ERR("Failed to subscribe to MQTT topic: %d", err);
+        return err;
     }
     
     return 0;

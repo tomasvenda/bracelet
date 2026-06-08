@@ -13,7 +13,9 @@ enum bracelet_event_type {
     EVENT_SERVER_ACK_ALERT, /* The server acknowledges the alert */
     EVENT_ML_FALL_DETECTED, /* TinyML output */
     EVENT_ML_NO_FALL, /* TinyML output */
-    EVENT_TIMER_3MIN_EXPIRED
+    EVENT_TIMER_3MIN_EXPIRED,
+    EVENT_SERVER_WIFI_SUCCESS,    // WiFi scanning success on server side
+    EVENT_SERVER_WIFI_FAIL,     // WiFi scanning failed on server side  
 };
 
 /* The ZBUS message payload */

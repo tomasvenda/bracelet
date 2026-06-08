@@ -212,7 +212,8 @@ static void do_lte_cell_id(void)
 
 void localization_thread(void *p1, void *p2, void *p3)
 {
-    static struct net_mgmt_event_callback wifi_cb;
+    static struct net_mgmt_event_callback wifi_cb;                  // registers a Wi-Fi callback so we can collect the wi fi scan results
+    
     net_mgmt_init_event_callback(&wifi_cb, wifi_mgmt_event_handler, 
                                  NET_EVENT_WIFI_SCAN_RESULT | NET_EVENT_WIFI_SCAN_DONE);
     net_mgmt_add_event_callback(&wifi_cb);
@@ -220,17 +221,55 @@ void localization_thread(void *p1, void *p2, void *p3)
     LOG_INF("Integrated Localization Thread Started");
 
     while (1) {
-        k_event_wait(&app_events, EVENT_USER_MOVING, false, K_FOREVER);
+        k_event_wait(&app_events, EVENT_USER_MOVING, false, K_FOREVER); // Block here until the user is moving 
         
         LOG_INF("Motion detected! Starting localization waterfall...");
 
         /* 1. Try Wi-Fi */
         int aps = do_wifi_scan();
-        if (aps >= 300) {           // 300 just while debugging gnss and lte
+        if (aps >= 5) {           // Enough to make the wi fi scan worth trying 
             LOG_INF("Wi-Fi sufficient (%d APs). Sending...", aps);
-            data_manager_send_wifi(best_aps, aps);
-        } else {
-            LOG_INF("Wi-Fi insufficient (%d APs). Falling back to GNSS...", aps);
+            int  retries = 2;      
+            bool wifi_resolved = false;  // true when the server actually processes and responds
+            bool wifi_successful = false; // true when the server confirms it worked
+
+            while (retries > 0 && !wifi_resolved) {
+                /* Clear any stale server response bits from previous runs */
+                k_event_clear(&app_events,
+                              EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL);
+
+                data_manager_send_wifi(best_aps, aps);
+
+                /* Block up to 10 seconds waiting for the server’s verdict.
+                 * The LTE/MQTT layer will set EVENT_SERVER_WIFI_SUCCESS or
+                 * EVENT_SERVER_WIFI_FAIL when it receives "wifi_successful"
+                 * or "wifi_failed" on the subscribed topic.
+                 */
+                uint32_t events = k_event_wait(
+                    &app_events,
+                    EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL,
+                    false,
+                    K_SECONDS(10));
+
+                if (events & EVENT_SERVER_WIFI_SUCCESS) {
+                    wifi_successful = true;
+                    wifi_resolved   = true;
+                } else if (events & EVENT_SERVER_WIFI_FAIL) {
+                    wifi_successful = false;
+                    wifi_resolved   = true;
+                } else {
+                    /* Timeout: no response within 10 seconds */
+                    retries--;
+                    if (retries > 0) {
+                        LOG_INF("Server response timeout. Retrying Wi-Fi send...");
+                    }
+                }
+            }
+
+            if (wifi_successful) {
+                LOG_INF("Server confirmed Wi-Fi localization -> Ending pipeline.");
+            } else {
+            LOG_INF("Wi-Fi failed or timed out, attempting GNSS...");
             
             /* 2. Try GNSS */
             if (do_gnss_fix() == 0) {
@@ -243,6 +282,7 @@ void localization_thread(void *p1, void *p2, void *p3)
                 do_lte_cell_id();
             }
         }
+    }
 
         k_sleep(K_SECONDS(30)); /* Cooldown */
     }

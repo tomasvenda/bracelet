@@ -57,7 +57,8 @@ static void deep_sleep_run(void *o) {
 static void location_ping_entry(void *o) {
     printf("[STATE] Entered LOCATION_PING. Scanning Wi-Fi/GNSS...\n");
     fsm.previous_state = STATE_LOCATION_PING;
-    // TODO: Call comms.c -> update_localization()
+    /// TODO: Call comms.c -> update_localization()
+    // 
 }
 
 static void location_ping_run(void *o) {
@@ -72,13 +73,13 @@ static void location_ping_run(void *o) {
 static void active_tracking_entry(void *o) {
     printf("[STATE] Entered ACTIVE_TRACKING. High alert tracking.\n");
     fsm.previous_state = STATE_ACTIVE_TRACKING;
-    // TODO: Start the 3-minute Zephyr kernel timer here
+    /// TODO: Start the 3-minute Zephyr kernel timer here
 }
 
 static void active_tracking_run(void *o) {
     if (fsm.current_event.type == EVENT_TIMER_3MIN_EXPIRED) {
         printf("        -> 3 Min Timer Expired. Pinging server...\n");
-        // TODO: Call comms.c -> update_localization()
+        /// TODO: Call comms.c -> update_localization()
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_STATIONARY) {
         // Assuming IMU logic is handled before publishing this event
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
@@ -92,7 +93,7 @@ static void do_ml_evaluation_work(struct k_work *work) {
     float ml_data_buffer[300]; // Example: 50Hz * 2 sec * 3 channels
     
     // 2. Poll BOTH the IMU and Barometer to fill the buffer
-    // TODO: write the right function here
+    /// TODO: write the right function here
     sensors_collect_ml_window(ml_data_buffer); // We will write this in sensors.c
     
     // 3. Pass the combined buffer to your C++ TinyML wrapper

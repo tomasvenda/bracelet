@@ -54,7 +54,7 @@ int main(void)
                          rx_msg.data.cell.cell_id, rx_msg.data.cell.area_code);
             }
 
-            LOG_INF("Publishing Location Payload: %s", json_payload);
+            //LOG_INF("Publishing Location Payload: %s", json_payload);
             lte_mqtt_publish_str(json_payload);
         }
     }
