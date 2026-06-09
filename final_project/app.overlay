@@ -96,7 +96,12 @@
             compatible = "nordic,npm1300-charger";
             status = "okay";
             /* Increase USB input current limit to 500mA to prevent boot brownouts */
-            vbus-limit-microamp = <500000>; 
+            vbus-limit-microamp = <500000>;
+            term-microvolt = <5000000>;
+            current-microamp = <400000>;
+            dischg-limit-microamp = <1000000>;
+            thermistor-ohms = <10000>;
+            thermistor-beta = <3380>;
         };
 
     };
