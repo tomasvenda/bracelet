@@ -8,14 +8,14 @@
 !npm1300/
 !scan/
 !server_com/
-!bracelet
-!barometer
-!accelerometer
-!wifi
-!button_led_buzzer
-!display
-!final_project
-!memory
+!bracelet/
+!barometer/
+!accelerometer/
+!wifi/
+!button_led_buzzer/
+!display/
+!final_project/
+!memory/
 
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
