@@ -14,14 +14,13 @@
         };
     };
 
-    /* --- I2C1 --- */
-    i2c1_default: i2c1_default {
+    i2c2_default: i2c2_default {
         group1 {
             psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
                     <NRF_PSEL(TWIM_SCL, 0, 8)>;
         };
     };
-    i2c1_sleep: i2c1_sleep {
+    i2c2_sleep: i2c2_sleep {
         group1 {
             psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
                     <NRF_PSEL(TWIM_SCL, 0, 8)>;
@@ -67,10 +66,10 @@
     };
 };
 
-&i2c1 {
+&i2c2 {
     status = "okay";
-    pinctrl-0 = <&i2c1_default>;
-    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-0 = <&i2c2_default>;
+    pinctrl-1 = <&i2c2_sleep>;
     pinctrl-names = "default", "sleep";
     clock-frequency = <I2C_BITRATE_FAST>;
 
@@ -97,7 +96,7 @@
             status = "okay";
             /* Increase USB input current limit to 500mA to prevent boot brownouts */
             vbus-limit-microamp = <500000>;
-            term-microvolt = <5000000>;
+            term-microvolt = <4200000>;
             current-microamp = <400000>;
             dischg-limit-microamp = <1000000>;
             thermistor-ohms = <10000>;

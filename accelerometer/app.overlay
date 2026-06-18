@@ -14,14 +14,13 @@
         };
     };
 
-    /* --- I2C1 --- */
-    i2c1_default: i2c1_default {
+    i2c2_default: i2c2_default {
         group1 {
             psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
                     <NRF_PSEL(TWIM_SCL, 0, 8)>;
         };
     };
-    i2c1_sleep: i2c1_sleep {
+    i2c2_sleep: i2c2_sleep {
         group1 {
             psels = <NRF_PSEL(TWIM_SDA, 0, 9)>,
                     <NRF_PSEL(TWIM_SCL, 0, 8)>;
@@ -67,10 +66,10 @@
     };
 };
 
-&i2c1 {
+&i2c2 {
     status = "okay";
-    pinctrl-0 = <&i2c1_default>;
-    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-0 = <&i2c2_default>;
+    pinctrl-1 = <&i2c2_sleep>;
     pinctrl-names = "default", "sleep";
     clock-frequency = <I2C_BITRATE_FAST>;
 
@@ -90,6 +89,8 @@
             npm1300_ldo2: LDO2 {
                 regulator-boot-on; /* Powers the BMI270 VIN */
             };
+
+
         };
 
         npm1300_charger: charger {
@@ -97,7 +98,7 @@
             status = "okay";
             /* Increase USB input current limit to 500mA to prevent boot brownouts */
             vbus-limit-microamp = <500000>;
-            term-microvolt = <5000000>;
+            term-microvolt = <4200000>;
             current-microamp = <400000>;
             dischg-limit-microamp = <1000000>;
             thermistor-ohms = <10000>;
@@ -105,26 +106,26 @@
         };
 
     };
-    
+
 
     /* Bosch BMI270 IMU */
     bmi270: bmi270@68 {
         compatible = "bosch,bmi270";
         reg = <0x68>;
-        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>; 
+        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
     };
 
     /* TDK Barometer */
     icp20100: icp20100@63 {
-        compatible = "invensense,icp201xx"; 
-        reg = <0x63>; 
+        compatible = "invensense,icp201xx";
+        reg = <0x63>;
         int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
     };
 
     /* OLED Display */
     ssd1306: ssd1306@3c {
         compatible = "solomon,ssd1306fb";
-        reg = <0x3c>; 
+        reg = <0x3c>;
         width = <128>;
         height = <64>;
         segment-offset = <0>;
@@ -132,7 +133,7 @@
         display-offset = <0>;
         multiplex-ratio = <63>;
         prechargep = <0x22>;
-        reset-gpios = <&gpio0 23 GPIO_ACTIVE_LOW>; 
+        reset-gpios = <&gpio0 23 GPIO_ACTIVE_LOW>;
     };
 };
 
@@ -141,23 +142,23 @@
     pinctrl-0 = <&spi3_default>;
     pinctrl-1 = <&spi3_sleep>;
     pinctrl-names = "default", "sleep";
-    
+
     cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>,
                <&gpio0 12 GPIO_ACTIVE_LOW>;
 
     /* NOR Flash (32Mb) */
     mx25u32: flash@0 {
         compatible = "jedec,spi-nor";
-        reg = <0>; 
+        reg = <0>;
         spi-max-frequency = <8000000>;
         size = <33554432>;
         jedec-id = [c2 25 36];
     };
-    
+
     /* Wi-Fi Companion (nRF7002) */
     nrf7002: wifi@1 {
         compatible = "nordic,nrf7002-spi";
-        reg = <1>; 
+        reg = <1>;
         bucken-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
         host-irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
         spi-max-frequency = <8000000>;
@@ -195,8 +196,8 @@
 
     /* Custom Routing */
     custom_gpios {
-        compatible = "gpio-leds"; 
-        
+        compatible = "gpio-leds";
+
         /* MCU P0.19 wired to PMIC GPIO1 */
         mcu_to_pmic_gpio1: mcu_to_pmic_gpio1 {
             gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
@@ -206,9 +207,9 @@
 
     /* Display Power Control Pin */
     display_ctrl {
-        compatible = "gpio-leds"; 
+        compatible = "gpio-leds";
         disp_power_en: disp_power_en {
-            gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>; 
+            gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
             label = "OLED Power Enable";
         };
     };
@@ -216,7 +217,7 @@
     /* Buzzer PWM routing */
     pwm_buzzer: pwm_buzzer {
         compatible = "pwm-beeper";
-        pwms = <&pwm0 3 PWM_HZ(4000) PWM_POLARITY_NORMAL>; 
+        pwms = <&pwm0 3 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
     };
 
     pwmleds {
