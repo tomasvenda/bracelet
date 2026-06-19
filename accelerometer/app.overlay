@@ -73,6 +73,11 @@
     pinctrl-names = "default", "sleep";
     clock-frequency = <I2C_BITRATE_FAST>;
 
+    /* Allocate RAM buffer for the BMI270 8KB config bursts */
+    zephyr,concat-buf-size = <2048>;
+    zephyr,flash-buf-max-size = <2048>;
+
+
     npm1300: pmic@6b {
         compatible = "nordic,npm1300";
         reg = <0x6b>;
@@ -87,9 +92,15 @@
             };
 
             npm1300_ldo2: LDO2 {
-                regulator-boot-on; /* Powers the BMI270 VIN */
-            };
+                /* Set the voltage to 1.8V */
+                regulator-min-microvolt = <1800000>;
+                regulator-max-microvolt = <1800000>;
+                regulator-init-microvolt = <1800000>;
 
+                /* Force early power-on during boot */
+                regulator-boot-on;
+                regulator-always-on;
+            };
 
         };
 
@@ -113,6 +124,8 @@
         compatible = "bosch,bmi270";
         reg = <0x68>;
         irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+        //zephyr,deferred-init;
+
     };
 
     /* TDK Barometer */
