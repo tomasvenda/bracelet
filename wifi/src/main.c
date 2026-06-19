@@ -1,17 +1,17 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
 
-#include <zephyr/net/net_core.h>
 #include <zephyr/net/net_if.h>
-#include <zephyr/net/net_event.h>
 #include <zephyr/net/net_mgmt.h>
-#include <zephyr/net/wifi.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/net/wifi_utils.h>
 
 #include <string.h>
+#include <stdio.h>
 #include <errno.h>
 
 LOG_MODULE_REGISTER(wifi_app, LOG_LEVEL_DBG);
@@ -19,6 +19,103 @@ LOG_MODULE_REGISTER(wifi_app, LOG_LEVEL_DBG);
 static uint32_t scan_result_count;
 static struct net_mgmt_event_callback wifi_mgmt_cb;
 K_SEM_DEFINE(scan_sem, 0, 1);
+
+static const struct device *gpio0_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+static const struct device *spi3_dev  = DEVICE_DT_GET(DT_NODELABEL(spi3));
+
+static void format_mac(const uint8_t *mac, char *buf, size_t len)
+{
+	snprintk(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X",
+		 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static void wifi_en_selftest(void)
+{
+	int ret;
+
+	printk("=== WIFI_EN selftest on P0.17 ===\n");
+
+	if (!device_is_ready(gpio0_dev)) {
+		printk("GPIO0 not ready\n");
+		return;
+	}
+
+	ret = gpio_pin_configure(gpio0_dev, 17, GPIO_OUTPUT_INACTIVE);
+	printk("WIFI_EN configure P0.17 ret=%d\n", ret);
+
+	ret = gpio_pin_set(gpio0_dev, 17, 0);
+	printk("WIFI_EN set low ret=%d\n", ret);
+	k_sleep(K_MSEC(20));
+
+	ret = gpio_pin_set(gpio0_dev, 17, 1);
+	printk("WIFI_EN set high ret=%d\n", ret);
+	k_sleep(K_MSEC(20));
+
+	ret = gpio_pin_set(gpio0_dev, 17, 1);
+	printk("WIFI_EN hold high ret=%d\n", ret);
+	k_sleep(K_MSEC(20));
+}
+
+static void spi_loopback_test(void)
+{
+	int ret;
+	uint8_t tx_buf[] = { 0xAB, 0xCD, 0xEF, 0x42 };
+	uint8_t rx_buf[sizeof(tx_buf)] = { 0 };
+
+	struct spi_buf tx = {
+		.buf = tx_buf,
+		.len = sizeof(tx_buf),
+	};
+
+	struct spi_buf rx = {
+		.buf = rx_buf,
+		.len = sizeof(rx_buf),
+	};
+
+	struct spi_buf_set tx_set = {
+		.buffers = &tx,
+		.count = 1,
+	};
+
+	struct spi_buf_set rx_set = {
+		.buffers = &rx,
+		.count = 1,
+	};
+
+	struct spi_config cfg = {
+		.frequency = 1000000,
+		.operation = SPI_OP_MODE_MASTER |
+			     SPI_WORD_SET(8) |
+			     SPI_TRANSFER_MSB |
+			     SPI_LINES_SINGLE,
+		.slave = 0,
+		.cs = { 0 },
+	};
+
+	printk("=== SPI3 loopback selftest ===\n");
+	printk("NOTE: Temporarily short MOSI(P0.14) to MISO(P0.15) for this test.\n");
+
+	if (!device_is_ready(spi3_dev)) {
+		printk("SPI3 not ready\n");
+		return;
+	}
+
+	ret = spi_transceive(spi3_dev, &cfg, &tx_set, &rx_set);
+
+	printk("SPI loopback ret=%d\n", ret);
+	printk("TX: %02X %02X %02X %02X\n",
+	       tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3]);
+	printk("RX: %02X %02X %02X %02X\n",
+	       rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
+
+	if (ret == 0 && memcmp(tx_buf, rx_buf, sizeof(tx_buf)) == 0) {
+		printk("SPI loopback PASSED\n");
+	} else if (ret == 0) {
+		printk("SPI loopback DATA MISMATCH\n");
+	} else {
+		printk("SPI loopback FAILED\n");
+	}
+}
 
 static void print_iface_cb(struct net_if *iface, void *user_data)
 {
@@ -28,41 +125,28 @@ static void print_iface_cb(struct net_if *iface, void *user_data)
 	const char *dev_name = dev ? dev->name : "<no-dev>";
 	int index = net_if_get_by_iface(iface);
 
-	printk("iface[%d]: dev=%s up=%d dormant=%d\n",
-	       index, dev_name, net_if_is_up(iface), net_if_is_dormant(iface));
-}
-
-static bool iface_is_wifi(struct net_if *iface)
-{
-	struct wifi_iface_status status = {0};
-	int ret;
-
-	if (!iface) {
-		return false;
-	}
-
-	ret = net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status));
-	return (ret == 0);
+	printk("iface[%d]: dev=%s, up=%d, dormant=%d\n",
+	       index,
+	       dev_name,
+	       net_if_is_up(iface),
+	       net_if_is_dormant(iface));
 }
 
 static struct net_if *find_wifi_iface(void)
 {
-	struct net_if *iface = NULL;
+	struct net_if *iface = net_if_get_default();
 
-	STRUCT_SECTION_FOREACH(net_if, iface) {
-		if (iface_is_wifi(iface)) {
-			return iface;
-		}
+	if (!iface) {
+		printk("SANITY: net_if_get_default() returned NULL\n");
+		return NULL;
 	}
 
-	printk("SANITY: No Wi-Fi interface found.\n");
-	printk("SANITY: This usually means wlan0 was not created.\n");
-	printk("SANITY: Check app.overlay for:\n");
-	printk("  - nrf7002 node status = \"okay\"\n");
-	printk("  - child node wlan0 { compatible = \"nordic,wlan\"; }\n");
-	printk("  - chosen { zephyr,wifi = &wlan0; }\n");
+	if (strcmp(net_if_get_device(iface)->name, "wlan0") != 0) {
+		printk("SANITY: default iface is not wlan0, it is %s\n",
+		       net_if_get_device(iface)->name);
+	}
 
-	return NULL;
+	return iface;
 }
 
 static void dump_wifi_status(struct net_if *iface)
@@ -93,9 +177,9 @@ static void dump_wifi_status(struct net_if *iface)
 
 static void handle_wifi_scan_result(const struct net_mgmt_event_callback *cb)
 {
-	const struct wifi_scan_result *entry =
-		(const struct wifi_scan_result *)cb->info;
+	const struct wifi_scan_result *entry = (const struct wifi_scan_result *)cb->info;
 	char ssid_print[WIFI_SSID_MAX_LEN + 1];
+	char mac_buf[18];
 	int ssid_len;
 
 	if (!entry) {
@@ -115,14 +199,15 @@ static void handle_wifi_scan_result(const struct net_mgmt_event_callback *cb)
 	memcpy(ssid_print, entry->ssid, ssid_len);
 	ssid_print[ssid_len] = '\0';
 
-	printk("%-4u | %-32s | %-4u | %-4d | %-5s | %02x:%02x:%02x:%02x:%02x:%02x\n",
+	format_mac(entry->mac, mac_buf, sizeof(mac_buf));
+
+	printk("%-4u | %-32s | %-4u | %-4d | %-5s | %s\n",
 	       scan_result_count,
 	       ssid_print,
 	       entry->channel,
 	       entry->rssi,
 	       wifi_security_txt(entry->security),
-	       entry->mac[0], entry->mac[1], entry->mac[2],
-	       entry->mac[3], entry->mac[4], entry->mac[5]);
+	       mac_buf);
 }
 
 static void handle_wifi_scan_done(const struct net_mgmt_event_callback *cb)
@@ -142,6 +227,8 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 				    uint64_t mgmt_event,
 				    struct net_if *iface)
 {
+	ARG_UNUSED(cb);
+
 	printk("MGMT event: 0x%llx on iface=%d\n",
 	       mgmt_event,
 	       iface ? net_if_get_by_iface(iface) : -1);
@@ -158,7 +245,6 @@ static int wifi_scan(void)
 	struct net_if *iface = find_wifi_iface();
 	struct wifi_scan_params params = {0};
 	int ret;
-	char bands_list[] = CONFIG_WIFI_SCAN_BANDS_LIST;
 
 	if (!iface) {
 		return -ENOENT;
@@ -166,12 +252,16 @@ static int wifi_scan(void)
 
 	dump_wifi_status(iface);
 
-	if (strlen(bands_list) > 0U) {
-		printk("Scanning bands: %s\n", bands_list);
-		ret = wifi_utils_parse_scan_bands(bands_list, &params.bands);
-		if (ret) {
-			printk("SANITY: wifi_utils_parse_scan_bands failed: %d\n", ret);
-			return ret;
+	{
+		char bands_list[] = CONFIG_WIFI_SCAN_BANDS_LIST;
+
+		if (strlen(bands_list) > 0) {
+			printk("Scanning bands: %s\n", bands_list);
+			ret = wifi_utils_parse_scan_bands(bands_list, &params.bands);
+			if (ret) {
+				printk("SANITY: wifi_utils_parse_scan_bands failed: %d\n", ret);
+				return ret;
+			}
 		}
 	}
 
@@ -186,19 +276,13 @@ static int wifi_scan(void)
 	ret = net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params));
 	if (ret) {
 		printk("ERROR: NET_REQUEST_WIFI_SCAN failed: %d\n", ret);
-		printk("SANITY: Common causes:\n");
-		printk("  - nRF7002 driver not initialized\n");
-		printk("  - wrong devicetree / missing wlan0 child\n");
-		printk("  - chip not powered\n");
-		printk("  - IRQ pin wrong or not toggling\n");
+		printk("SANITY: likely causes are nRF7002 init failure, enable pin, SPI, or IRQ.\n");
 		return ret;
 	}
 
 	ret = k_sem_take(&scan_sem, K_SECONDS(20));
 	if (ret) {
 		printk("ERROR: Timed out waiting for scan completion: %d\n", ret);
-		printk("SANITY: Request was sent but no completion event arrived.\n");
-		printk("SANITY: This often points to IRQ / SPI / power problems.\n");
 		return ret;
 	}
 
@@ -209,21 +293,23 @@ static int wifi_scan(void)
 int main(void)
 {
 	struct net_if *def = net_if_get_default();
-	struct net_if *wifi;
+	struct net_if *wifi = NULL;
+
+	wifi_en_selftest();
+	spi_loopback_test();
 
 	printk("\n*** nRF9151 + nRF7002 Wi-Fi scan sanity app ***\n");
 
-#if DT_NODE_EXISTS(DT_NODELABEL(nrf7002))
-	printk("DT sanity: nrf7002 node exists.\n");
+#if DT_NODE_EXISTS(DT_NODELABEL(nrf70))
+	printk("DT sanity: nrf70 node exists.\n");
 #else
-	printk("DT sanity: nrf7002 node NOT found.\n");
+	printk("DT sanity: nrf70 node NOT found.\n");
 #endif
 
 #if DT_NODE_EXISTS(DT_NODELABEL(wlan0))
 	printk("DT sanity: wlan0 node exists.\n");
 #else
 	printk("DT sanity: wlan0 node NOT found.\n");
-	printk("DT sanity: add wlan0 { compatible = \"nordic,wlan\"; } under nrf7002.\n");
 #endif
 
 	printk("Enumerating network interfaces...\n");
@@ -242,7 +328,9 @@ int main(void)
 	if (!wifi) {
 		printk("FATAL: No Wi-Fi iface available. Retrying every 10s.\n");
 	} else {
-		printk("Wi-Fi iface found: index=%d\n", net_if_get_by_iface(wifi));
+		printk("Wi-Fi iface selected: index=%d dev=%s\n",
+		       net_if_get_by_iface(wifi),
+		       net_if_get_device(wifi)->name);
 		dump_wifi_status(wifi);
 	}
 

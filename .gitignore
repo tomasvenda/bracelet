@@ -34,6 +34,7 @@ button_led_buzzer/build/
 display/build/
 final_project/build/
 memory/build/
+memory/build_1/
 
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*
