@@ -98,12 +98,19 @@ menu "Communication with MQTT broker"
 
 config MQTT_PUB_TOPIC
     string "MQTT publish topic"
-    default "bracelet/prototype_1/data" 
+    default "bracelet/prototype_pcb/data"
     help
-      The prototype_1 will be replaced by a unique ID later.
+      The topic the bracelet publishes all data to.
+
+config MQTT_SUB_TOPIC
+    string "MQTT subscribe topic"
+    default "bracelet/prototype_pcb/response"
+    help
+      The topic the bracelet listens on for server responses.
 
 config MQTT_CLIENT_ID
     string "MQTT Client ID"
+    default "prototype_pcb"
     help
       Use a custom Client ID string. If not set, the client ID will be
       generated automatically.
@@ -119,6 +126,14 @@ config MQTT_BROKER_PORT
     default 1883
     help
       Standard TCP is 1883. Secure TLS/SSL is usually 8883.
+
+config MQTT_BOOTSTRAP_SECURITY_CODE
+    string "Bootstrap security code"
+    default "987654"
+    help
+      The security code sent in the first MQTT message after boot.
+      The server uses this to register the bracelet in its database.
+      The mobile app user must enter this exact code when pairing.
 
 endmenu
 

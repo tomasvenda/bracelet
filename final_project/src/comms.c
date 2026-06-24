@@ -31,10 +31,12 @@ static K_SEM_DEFINE(gnss_fix_sem, 0, 1);
 static K_SEM_DEFINE(lte_connected, 0, 1);
 static K_SEM_DEFINE(mqtt_connected_sem, 0, 1);
 
-#define MQTT_TOPIC "bracelet/prototype_1/data"
-#define CLIENT_ID "prototype_1"
+K_EVENT_DEFINE(app_events); // event flag used purely for the Wi-Fi localisation handshake
 
-#define MQTT_SUB_TOPIC "bracelet/prototype_1/response"
+#define MQTT_TOPIC "bracelet/prototype_pcb/data"
+#define CLIENT_ID "prototype_pcb"
+
+#define MQTT_SUB_TOPIC "bracelet/prototype_pcb/response"
 /* List of topics the MQTT helper will subscribe to */
 static struct mqtt_topic sub_topic = {
     .topic = {
@@ -54,6 +56,13 @@ static struct mqtt_subscription_list sub_list = {
 #ifndef CONFIG_MQTT_BROKER_HOSTNAME
 #define CONFIG_MQTT_BROKER_HOSTNAME "20.251.201.46"
 #endif
+
+/* Bootstrap security code — set this in prj.conf as CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE */
+#ifndef CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE
+#define CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE "987654"
+#endif
+
+static bool bootstrap_sent = false;
 
 static bool mqtt_is_connected = false;
 static const char *current_status = "ok"; 
@@ -99,7 +108,7 @@ static void handle_wifi_scan_result(struct net_mgmt_event_callback *cb)
     }
 }
 
-static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb, uint32_t mgmt_event, struct net_if *iface)
+static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *iface)
 {
     if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
         handle_wifi_scan_result(cb);
@@ -131,6 +140,11 @@ static void lte_handler(const struct lte_lc_evt *const evt)
             (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)) {
             LOG_INF("LTE Network registered");
             k_sem_give(&lte_connected);
+        } else if (evt->nw_reg_status == LTE_LC_NW_REG_REGISTRATION_DENIED) {
+            LOG_ERR("Cell twers rejected connection! Turning off modem to prevent FPLMN lock.");
+            lte_lc_offline();
+            k_sleep(K_MINUTES(2));
+            lte_lc_normal();
         }
     }
 }
@@ -230,6 +244,24 @@ static int lte_mqtt_publish_str(const char *payload)
 
     return mqtt_helper_publish(&param);
 }
+
+static int comms_send_bootstrap(void)
+{
+    char payload[128];
+    int written = snprintf(payload, sizeof(payload),
+        "{\"security_code\":\"%s\",\"battery\":%d,\"status\":\"ok\"}",
+        CONFIG_MQTT_BOOTSTRAP_SECURITY_CODE,
+        get_battery_level());
+
+    if (written < 0 || written >= (int)sizeof(payload)) {
+        LOG_ERR("Bootstrap payload format failed");
+        return -ENOMEM;
+    }
+
+    LOG_INF("Publishing bootstrap message: %s", payload);
+    return lte_mqtt_publish_str(payload);
+}
+
 
 /* ------------------------------------------------------------------
  * LOCALIZATION TRIGGERS
@@ -472,6 +504,15 @@ int comms_init(void)
         return -ETIMEDOUT;
     }
 
+    if (!bootstrap_sent) {
+        err = comms_send_bootstrap();
+        if (err) {
+            LOG_ERR("Bootstrap publish failed: %d", err);
+            return err;
+        }
+        bootstrap_sent = true;
+    }
+
     // Subscribing to the responses topic
     LOG_INF("Subscribing to %s...", MQTT_SUB_TOPIC);
     err = mqtt_helper_subscribe(&sub_list);
@@ -479,6 +520,6 @@ int comms_init(void)
         LOG_ERR("Failed to subscribe to MQTT topic: %d", err);
         return err;
     }
-    
+
     return 0;
 }

@@ -12,4 +12,14 @@ int sensors_init(void);
  */
 int sensors_collect_ml_window(float *ml_data_buffer, int max_features);
 
+// Color bitmask — include this header wherever you call sensors_led_on/off
+#define LED_RED   BIT(0)
+#define LED_GREEN BIT(1)
+#define LED_BLUE  BIT(2)
+
+void sensors_led_on(uint8_t color);
+void sensors_led_off(uint8_t color);
+void sensors_buzzer_on(void);
+void sensors_buzzer_off(void);
+
 #endif /* SENSORS_H */

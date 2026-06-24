@@ -106,7 +106,7 @@
             compatible = "nordic,npm1300-charger";
             status = "okay";
             /* Increase USB input current limit to 500mA to prevent boot brownouts */
-            vbus-limit-microamp = <500000>;
+            vbus-limit-microamp = <1000000>;
             term-microvolt = <4200000>;
             current-microamp = <400000>;
             dischg-limit-microamp = <1000000>;
@@ -164,25 +164,45 @@
         jedec-id = [c2 25 36];
     };
 
-    /* Wi-Fi Companion (nRF7002) */
-    nrf7002: wifi@1 {
-        compatible = "nordic,nrf7002-spi";
-        reg = <1>;
-        bucken-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
-        host-irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
-        spi-max-frequency = <8000000>;
+	nrf70: wifi@1 {
+		compatible = "nordic,nrf7002-spi";
+		reg = <1>;
+		status = "okay";
 
-        /* TX Power Limits (Required for RF Regulatory Compliance) */
-        wifi-max-tx-pwr-2g-dsss = <16>;
-        wifi-max-tx-pwr-2g-mcs0 = <16>;
-        wifi-max-tx-pwr-2g-mcs7 = <15>;
-        wifi-max-tx-pwr-5g-low-mcs0 = <14>;
-        wifi-max-tx-pwr-5g-low-mcs7 = <13>;
-        wifi-max-tx-pwr-5g-mid-mcs0 = <14>;
-        wifi-max-tx-pwr-5g-mid-mcs7 = <13>;
-        wifi-max-tx-pwr-5g-high-mcs0 = <14>;
-        wifi-max-tx-pwr-5g-high-mcs7 = <13>;
-    };
+		/*
+		 * 8 MHz is the safe minimum for RPU FW loading.
+		 * nRF7002 supports up to 40 MHz — increase only after
+		 * initial bring-up is confirmed working.
+		 */
+		spi-max-frequency = <8000000>;
+		duplex = <0>;        /* SPI_FULL_DUPLEX */
+		frame-format = <0>;  /* SPI_FRAME_FORMAT_MOTOROLA */
+
+		/* BUCKEN = WIFI_ENABLE on your schematic, drives VDD_BUCK rail */
+		bucken-gpios   = <&gpio0 17 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		/* HOST_IRQ = IRQ net on your schematic */
+		host-irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+
+		/* IOVDD supplied by the always-on 1V8_SW regulator */
+		iovdd-regulator         = <&reg_1v8_sw>;
+		iovdd-power-up-delay-ms = <50>;
+
+		/* Max TX power (dBm) — conservative defaults, tune after bring-up */
+		wifi-max-tx-pwr-2g-dsss      = <16>;
+		wifi-max-tx-pwr-2g-mcs0      = <16>;
+		wifi-max-tx-pwr-2g-mcs7      = <15>;
+		wifi-max-tx-pwr-5g-low-mcs0  = <14>;
+		wifi-max-tx-pwr-5g-low-mcs7  = <13>;
+		wifi-max-tx-pwr-5g-mid-mcs0  = <14>;
+		wifi-max-tx-pwr-5g-mid-mcs7  = <13>;
+		wifi-max-tx-pwr-5g-high-mcs0 = <14>;
+		wifi-max-tx-pwr-5g-high-mcs7 = <13>;
+
+		wlan0: wlan0 {
+			compatible = "nordic,wlan";
+			status = "okay";  /* REQUIRED in NCS 3.x */
+		};
+	};
 };
 
 / {
@@ -244,6 +264,19 @@
             label = "Blue LED";
         };
     };
+
+    /* Always-on 1V8_SW regulator feeding nRF7002 IOVDD */
+	reg_1v8_sw: reg_1v8_sw {
+		compatible = "regulator-fixed";
+		regulator-name = "1V8_SW";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	chosen {
+		zephyr,wifi = &wlan0;
+	};
 };
 
 /* Enable UART0 */

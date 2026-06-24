@@ -16,6 +16,7 @@
 !display/
 !final_project/
 !memory/
+!lte_pcb/
 
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
@@ -35,6 +36,7 @@ display/build/
 final_project/build/
 memory/build/
 memory/build_1/
+lte_pcb/build
 
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*

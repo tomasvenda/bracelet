@@ -3,7 +3,7 @@
 #include <zephyr/zbus/zbus.h>
 #include <stdio.h>
 #include "events.h"
-#include "sensor.h"
+#include "sensors.h"
 
 
 /* Define the ZBUS channel (Message size, subscribers, etc.) */
@@ -37,6 +37,9 @@ struct fsm_context {
     struct bracelet_event current_event;
 } fsm;
 
+/// TODO: Replace with actual TinyML header when inference model is integrated 
+static inline int run_fall_inference(float *buf) { (void)buf; return 0; }
+
 /* ======================================================================
  * STATE ACTIONS (Entry & Run logic for each bubble in the flowchart)
  * ====================================================================== */
@@ -47,11 +50,13 @@ static void deep_sleep_entry(void *o) {
     fsm.previous_state = STATE_DEEP_SLEEP; // Update tracker
 }
 
-static void deep_sleep_run(void *o) {
+static enum smf_state_result deep_sleep_run(void *o) {
     if (fsm.current_event.type == EVENT_IMU_LIGHT_MOTION) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_LOCATION_PING]);
     }
+    return SMF_EVENT_HANDLED;
 }
+
 
 // --- LOCATION PING ---
 static void location_ping_entry(void *o) {
@@ -61,7 +66,7 @@ static void location_ping_entry(void *o) {
     // 
 }
 
-static void location_ping_run(void *o) {
+static enum smf_state_result location_ping_run(void *o) {
     if (fsm.current_event.type == EVENT_SERVER_REPLY_STATIONARY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_MOVED) {
@@ -76,7 +81,7 @@ static void active_tracking_entry(void *o) {
     /// TODO: Start the 3-minute Zephyr kernel timer here
 }
 
-static void active_tracking_run(void *o) {
+static enum smf_state_result active_tracking_run(void *o) {
     if (fsm.current_event.type == EVENT_TIMER_3MIN_EXPIRED) {
         printf("        -> 3 Min Timer Expired. Pinging server...\n");
         /// TODO: Call comms.c -> update_localization()
@@ -94,7 +99,7 @@ static void do_ml_evaluation_work(struct k_work *work) {
     
     // 2. Poll BOTH the IMU and Barometer to fill the buffer
     /// TODO: write the right function here
-    sensors_collect_ml_window(ml_data_buffer); // We will write this in sensors.c
+    sensors_collect_ml_window(ml_data_buffer, 300); // We will write this in sensors.c
     
     // 3. Pass the combined buffer to your C++ TinyML wrapper
     int result = run_fall_inference(ml_data_buffer);
@@ -117,7 +122,7 @@ static void evaluation_entry(void *o) {
     k_work_submit(&ml_eval_work);
 }
 
-static void evaluation_run(void *o) {
+static enum smf_state_result evaluation_run(void *o) {
     if (fsm.current_event.type == EVENT_ML_NO_FALL) {
         printf("        -> TinyML says False Alarm. Returning to previous state.\n");
         smf_set_state(SMF_CTX(&fsm), &states[fsm.previous_state]);
@@ -135,7 +140,7 @@ static void alert_entry(void *o) {
     // TODO: Call comms.c -> update_status(REASON_EMERGENCY)
 }
 
-static void alert_run(void *o) {
+static enum smf_state_result alert_run(void *o) {
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
     }
