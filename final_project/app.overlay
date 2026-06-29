@@ -119,9 +119,9 @@
 
     /* Bosch BMI270 IMU */
     bmi270: bmi270@68 {
-        compatible = "bosch,bmi270";
+        compatible = "bosch,bmi270", "bosch,bmi270-base";
         reg = <0x68>;
-        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+        irq-gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
     };
 
     /* TDK Barometer */
@@ -213,6 +213,7 @@
         led1 = &led_green;
         led2 = &led_blue;
         pmic-gpio1 = &mcu_to_pmic_gpio1;
+        gpiote = &gpiote1;
     };
 
     buttons {
@@ -294,4 +295,9 @@
     pinctrl-0 = <&pwm0_default>;
     pinctrl-1 = <&pwm0_sleep>;
     pinctrl-names = "default", "sleep";
+};
+
+/* Making the pins not secure */
+&gpiote1 {
+    status = "okay";
 };

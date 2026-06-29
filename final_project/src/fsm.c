@@ -62,8 +62,9 @@ static enum smf_state_result deep_sleep_run(void *o) {
 static void location_ping_entry(void *o) {
     printf("[STATE] Entered LOCATION_PING. Scanning Wi-Fi/GNSS...\n");
     fsm.previous_state = STATE_LOCATION_PING;
-    /// TODO: Call comms.c -> update_localization()
-    // 
+    
+    // Performs one time the localization work
+    comms_update_localization();
 }
 
 static enum smf_state_result location_ping_run(void *o) {

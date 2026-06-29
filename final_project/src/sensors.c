@@ -13,7 +13,6 @@
 
 LOG_MODULE_REGISTER(sensors_system, LOG_LEVEL_INF);
 
-
 /* Devicetree Bindings */
 #define BMI270_NODE    DT_NODELABEL(bmi270)
 #define ICP201XX_NODE  DT_NODELABEL(icp20100)
@@ -61,6 +60,8 @@ static void imu_trigger_handler(const struct device *dev, const struct sensor_tr
 {
     struct bracelet_event event;
 
+    LOG_INF("BMI270 interrupt received!");
+
     if (trig->type == SENSOR_TRIG_MOTION) {
         event.type = EVENT_IMU_LIGHT_MOTION;
     } 
@@ -103,6 +104,83 @@ SYS_INIT(power_up_imu_during_boot, POST_KERNEL, 85);
 /* ======================================================================
  * PUBLIC FUNCTIONS
  * ====================================================================== */
+
+static int bmi270_configure_and_arm(void)
+{
+    int ret;
+
+    /* 1. Check if the device pointer itself is somehow null */
+    if (bmi_dev == NULL) {
+        LOG_ERR("bmi_dev pointer is completely NULL!");
+        return -EINVAL;
+    }
+
+    /* 2. Check if the driver API structure is null */
+    if (bmi_dev->api == NULL) {
+        LOG_ERR("bmi_dev->api is NULL! The driver did not link correctly.");
+        return -EINVAL;
+    }
+
+    /* 3. Check if the specific attr_set function pointer is null */
+    const struct sensor_driver_api *api = (const struct sensor_driver_api *)bmi_dev->api;
+    if (api->attr_set == NULL) {
+        LOG_ERR("attr_set API is NULL! Is CONFIG_SENSOR=y actually applying to the driver?");
+        return -EINVAL;
+    }
+    
+    if (api->trigger_set == NULL) {
+        LOG_ERR("trigger_set API is NULL! Trigger code is not compiled into the driver.");
+        return -EINVAL;
+    }
+
+    struct sensor_value full_scale    = { .val1 = 2,   .val2 = 0 };
+    struct sensor_value sampling_freq = { .val1 = 100, .val2 = 0 };
+    struct sensor_value oversampling  = { .val1 = 1,   .val2 = 0 };
+
+    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_FULL_SCALE, &full_scale);
+    if (ret) { LOG_ERR("[SENSORS] BMI270 full-scale failed: %d", ret); return ret; }
+
+    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_OVERSAMPLING, &oversampling);
+    if (ret) { LOG_ERR("[SENSORS] BMI270 oversampling failed: %d", ret); return ret; }
+
+    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &sampling_freq);
+    if (ret) { LOG_ERR("[SENSORS] BMI270 ODR failed: %d", ret); return ret; }
+
+    /* Set Any-Motion Threshold 1.5 m/s^2 (approx 0.15G) */
+    struct sensor_value slope_th = { .val1 = 0, .val2 = 500000 };
+    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &slope_th);
+    if (ret) { LOG_ERR("[SENSORS] BMI270 slope threshold failed: %d", ret); return ret; }
+
+    /* Set Any-Motion Duration (e.g., 60 ms) */
+    struct sensor_value slope_dur = { .val1 = 60, .val2 = 0 };
+    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &slope_dur);
+    if (ret) { LOG_ERR("[SENSORS] BMI270 slope duration failed: %d", ret); return ret; }
+
+    imu_motion_trig.type = SENSOR_TRIG_MOTION;
+    imu_motion_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
+
+    ret = sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
+
+    if (ret) {
+        LOG_ERR("Motion trigger failed: %d", ret);
+        return ret;
+    }
+    /*
+    imu_shock_trig.type = SENSOR_TRIG_DELTA;
+    imu_shock_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
+
+    LOG_INF("TRIGGER TEST 4");
+    ret = sensor_trigger_set(bmi_dev, &imu_shock_trig, imu_trigger_handler);
+    LOG_INF("TRIGGER TEST 5");
+
+    if (ret) {
+        LOG_WRN("Shock trigger failed: %d", ret);
+    }
+    */
+    LOG_INF("[SENSORS] BMI270 armed with default any-motion threshold.");
+    return 0;
+}
+
 
 int sensors_init(void)
 {
@@ -164,51 +242,16 @@ int sensors_init(void)
     if (!device_is_ready(bmi_dev)) {
         LOG_ERR("[SENSORS] BMI270 not ready, skipping trigger setup");
     } else {
-        LOG_INF("[SENSORS] DEBUG: IMU READY, Triggering...");
-        /* Configure chip FIRST, then arm triggers */
-        struct sensor_value full_scale    = { .val1 = 2,   .val2 = 0 };
-        struct sensor_value sampling_freq = { .val1 = 100, .val2 = 0 };
-        struct sensor_value oversampling  = { .val1 = 1,   .val2 = 0 };
-
-        sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_FULL_SCALE,        &full_scale);
-        sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_OVERSAMPLING,      &oversampling);
-        sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY,&sampling_freq);
-
-        /* Arm triggers ONCE, AFTER configuration */
-        imu_motion_trig.type = SENSOR_TRIG_MOTION;
-        imu_motion_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-        sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
-
-        imu_shock_trig.type = SENSOR_TRIG_DELTA;
-        imu_shock_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-        sensor_trigger_set(bmi_dev, &imu_shock_trig, imu_trigger_handler);
-
-        LOG_INF("[SENSORS] BMI270 configured and triggers armed.");
+        int imu_ret = bmi270_configure_and_arm();
+        if (imu_ret) {
+            LOG_ERR("[SENSORS] BMI270 setup failed: %d", imu_ret);
+            return imu_ret;
+        }
     }
-    // Configure accel: 2g full-scale, 100Hz, oversampling=1
-    // Taken directly from main-2.c proven working configuration.
-    struct sensor_value full_scale  = { .val1 = 2,   .val2 = 0 };
-    struct sensor_value sampling_freq = { .val1 = 100, .val2 = 0 };
-    struct sensor_value oversampling  = { .val1 = 1,   .val2 = 0 };
 
-    sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ,
-                    SENSOR_ATTR_FULL_SCALE, &full_scale);
-    sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ,
-                    SENSOR_ATTR_OVERSAMPLING, &oversampling);
-    sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ,
-                    SENSOR_ATTR_SAMPLING_FREQUENCY, &sampling_freq);
-
-    // Arm triggers
-    imu_motion_trig.type = SENSOR_TRIG_MOTION;
-    imu_motion_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-    sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
-
-    imu_shock_trig.type = SENSOR_TRIG_DELTA;
-    imu_shock_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-    sensor_trigger_set(bmi_dev, &imu_shock_trig, imu_trigger_handler);
-
-    LOG_INF("[SENSORS] BMI270 configured and triggers armed.");
+    LOG_INF("[SENSORS] BMI270 ready.");
     LOG_INF("[SENSORS] All hardware initialised successfully.");
+
     return 0;
 }
 

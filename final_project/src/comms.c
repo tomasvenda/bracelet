@@ -267,7 +267,8 @@ static int comms_send_bootstrap(void)
  * LOCALIZATION TRIGGERS
  * ------------------------------------------------------------------ */
 static int do_wifi_scan(void)
-{
+{   
+    /*
     struct net_if *iface = net_if_get_default();
     if (!iface) return -ENOENT;
 
@@ -276,6 +277,42 @@ static int do_wifi_scan(void)
 
     if (net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params))) return -EIO;
     k_sem_take(&wifi_scan_sem, K_SECONDS(10));
+    */
+
+    // Mocking the top 10 strongest APs from the provided network list
+    current_ap_count = 10;
+    
+    // 84% Signal -> approx -58 dBm
+    strcpy(best_aps[0].mac, "00:2a:10:20:c5:91");
+    best_aps[0].rssi = -58; 
+    strcpy(best_aps[1].mac, "00:2a:10:20:c5:92");
+    best_aps[1].rssi = -58; 
+    strcpy(best_aps[2].mac, "00:2a:10:20:c5:93");
+    best_aps[2].rssi = -58; 
+
+    // 83% Signal -> approx -59 dBm
+    strcpy(best_aps[3].mac, "00:2a:10:13:6c:b2");
+    best_aps[3].rssi = -59; 
+    strcpy(best_aps[4].mac, "00:2a:10:13:6c:b3");
+    best_aps[4].rssi = -59; 
+    strcpy(best_aps[5].mac, "00:2a:10:13:6c:b1");
+    best_aps[5].rssi = -59; 
+
+    // 82% Signal -> approx -59 dBm
+    strcpy(best_aps[6].mac, "00:2a:10:20:c5:9f");
+    best_aps[6].rssi = -59; 
+
+    // 81% Signal -> approx -60 dBm
+    strcpy(best_aps[7].mac, "00:2a:10:20:c5:9d");
+    best_aps[7].rssi = -60; 
+    strcpy(best_aps[8].mac, "00:2a:10:20:c5:9c");
+    best_aps[8].rssi = -60; 
+    strcpy(best_aps[9].mac, "00:2a:10:20:c5:9e");
+    best_aps[9].rssi = -60; 
+
+    // Log for debugging
+    LOG_INF("Wi-Fi scan bypassed. Loaded %d mock access points.", current_ap_count);
+
     return current_ap_count;
 }
 
@@ -300,13 +337,13 @@ static int do_gnss_fix(void)
  * ------------------------------------------------------------------ */
 static void perform_localization_work(struct k_work *work)
 {
-    char payload[512]; 
+    static char payload[1024]; 
     int offset = 0;
     int batt = get_battery_level();
     int aps = 0;
 
-    LOG_INF("Starting localization. Suspending LTE to free RF front-end...");
-    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+    //LOG_INF("Starting localization. Suspending LTE to free RF front-end...");
+    //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
 
     /* STEP 1: WI-FI */
     if (gpio_is_ready_dt(&pmic_wifi_en)) {
@@ -326,8 +363,9 @@ static void perform_localization_work(struct k_work *work)
     }
 
         if (aps >= 3) {
-        LOG_INF("Wi-Fi sufficient. Reactivating LTE...");
-        lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+        LOG_INF("Wi-Fi sufficient.");
+        //LOG_INF("Wi-Fi sufficient. Reactivating LTE...");
+        //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
         
         /* Build the Wi-Fi Payload */
         offset = snprintf(payload, sizeof(payload), 
@@ -376,7 +414,7 @@ static void perform_localization_work(struct k_work *work)
 
     else {
         /* If we reach here, Wi-Fi failed, timed out, or had < 3 APs */
-        LOG_INF("Wi-Fi failed or timed out. Suspending LTE for GNSS...");
+        LOG_INF("Wi-Fi failed or timed out. Suspending LTE for GNSS (maybe not required)...");
         lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
 
         /* STEP 2: GNSS */
@@ -520,6 +558,6 @@ int comms_init(void)
         LOG_ERR("Failed to subscribe to MQTT topic: %d", err);
         return err;
     }
-
+    LOG_INF("Subscribe SUCCESSFUL");
     return 0;
 }
