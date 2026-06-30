@@ -8,8 +8,8 @@ enum bracelet_event_type {
     EVENT_IMU_LIGHT_MOTION, /* Like walking*/
     EVENT_IMU_HARSH_IMPACT, /* A fall */
     EVENT_BUTTON_PRESSED,
-    EVENT_SERVER_REPLY_STATIONARY, /* Moved < 20m */
-    EVENT_SERVER_REPLY_MOVED,      /* Moved > 20m */
+    EVENT_SERVER_REPLY_HOME, /* INSIDE GEOFENCE */
+    EVENT_SERVER_REPLY_AWAY,      /* OUTSIDE GEOFENCE */
     EVENT_SERVER_ACK_ALERT, /* The server acknowledges the alert */
     EVENT_ML_FALL_DETECTED, /* TinyML output */
     EVENT_ML_NO_FALL, /* TinyML output */

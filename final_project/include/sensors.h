@@ -22,4 +22,7 @@ void sensors_led_off(uint8_t color);
 void sensors_buzzer_on(void);
 void sensors_buzzer_off(void);
 
+void sensors_disable_motion_trigger(void);
+void sensors_enable_motion_trigger(void);
+
 #endif /* SENSORS_H */

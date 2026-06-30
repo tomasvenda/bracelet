@@ -187,12 +187,12 @@ static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf
 
     /* 2. ZBUS FSM Events (if the payload is JSON) */
     struct bracelet_event event;
-    if (strstr(buf, "\"status\":\"stationary\"")) {
-        event.type = EVENT_SERVER_REPLY_STATIONARY;
+    if (strstr(buf, "located_home")) {
+        event.type = EVENT_SERVER_REPLY_HOME;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     } 
-    else if (strstr(buf, "\"status\":\"moved\"")) {
-        event.type = EVENT_SERVER_REPLY_MOVED;
+    else if (strstr(buf, "located_away")) {
+        event.type = EVENT_SERVER_REPLY_AWAY;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     }
     else if (strstr(buf, "\"ack\":true")) {

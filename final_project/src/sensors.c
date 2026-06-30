@@ -357,3 +357,25 @@ void sensors_buzzer_off(void)
     pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD,
             0U, PWM_POLARITY_NORMAL);
 }
+
+// Disables the motion interrupts
+void sensors_disable_motion_trigger(void) {
+    if (bmi_dev == NULL) return;
+    
+    // Safely unset the handler to stop Zephyr from firing the callback
+    sensor_trigger_set(bmi_dev, &imu_motion_trig, NULL);
+    LOG_INF("IMU light motion trigger disabled.");
+}
+
+// Enables the motion interrupt
+void sensors_enable_motion_trigger(void) {
+    if (bmi_dev == NULL) return;
+    
+    // Re-arm the handler using the same trigger struct from initialization
+    int ret = sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
+    if (ret) {
+        LOG_ERR("Failed to re-enable motion trigger: %d", ret);
+    } else {
+        LOG_INF("IMU light motion trigger enabled.");
+    }
+}

@@ -18,6 +18,24 @@ ZBUS_CHAN_DEFINE(fsm_events_chan,       /* Name */
 // We set a queue size of 4 if the events come faster than it can process
 ZBUS_SUBSCRIBER_DEFINE(fsm_sub, 4);
 
+/*===========================*/
+/* Timer for active tracking */
+/*===========================*/
+static void tracking_timer_expiry_cb(struct k_timer *timer_id);
+
+// Define the kernel timer
+K_TIMER_DEFINE(tracking_timer, tracking_timer_expiry_cb, NULL);
+
+// Timer expiry callback
+static void tracking_timer_expiry_cb(struct k_timer *timer_id) {
+    struct bracelet_event event = {
+        .type = EVENT_TIMER_3MIN_EXPIRED
+    };
+    
+    // Publish to the FSM safely from the timer's interrupt context
+    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+}
+
 /* Forward declaration of the state table */
 static const struct smf_state states[];
 
@@ -48,6 +66,9 @@ static inline int run_fall_inference(float *buf) { (void)buf; return 0; }
 static void deep_sleep_entry(void *o) {
     printf("[STATE] Entered DEEP_SLEEP. MCU sleeping. LTE/GNSS off.\n");
     fsm.previous_state = STATE_DEEP_SLEEP; // Update tracker
+
+    // Enable (or re-enable) the motion interrupt so we can wake up on next movement
+    sensors_enable_motion_trigger();
 }
 
 static enum smf_state_result deep_sleep_run(void *o) {
@@ -60,17 +81,19 @@ static enum smf_state_result deep_sleep_run(void *o) {
 
 // --- LOCATION PING ---
 static void location_ping_entry(void *o) {
-    printf("[STATE] Entered LOCATION_PING. Scanning Wi-Fi/GNSS...\n");
+    printf("[STATE] Entered LOCATION_PING. Updating location...\n");
     fsm.previous_state = STATE_LOCATION_PING;
     
+    // Disable the motion interrupt to save battery while we ping
+    sensors_disable_motion_trigger();
     // Performs one time the localization work
     comms_update_localization();
 }
 
 static enum smf_state_result location_ping_run(void *o) {
-    if (fsm.current_event.type == EVENT_SERVER_REPLY_STATIONARY) {
+    if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
-    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_MOVED) {
+    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
     }
 }
@@ -79,16 +102,21 @@ static enum smf_state_result location_ping_run(void *o) {
 static void active_tracking_entry(void *o) {
     printf("[STATE] Entered ACTIVE_TRACKING. High alert tracking.\n");
     fsm.previous_state = STATE_ACTIVE_TRACKING;
-    /// TODO: Start the 3-minute Zephyr kernel timer here
+
+    // Start the timer: First expiry in 3 mins, and periodically every 3 mins after
+    k_timer_start(&tracking_timer, K_MINUTES(3), K_MINUTES(3));
 }
 
 static enum smf_state_result active_tracking_run(void *o) {
     if (fsm.current_event.type == EVENT_TIMER_3MIN_EXPIRED) {
-        printf("        -> 3 Min Timer Expired. Pinging server...\n");
-        /// TODO: Call comms.c -> update_localization()
-    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_STATIONARY) {
+        printf("[ACTIVE TRACKING] 3 Min Timer Expired. Updating location...\n");
+        comms_update_localization();
+    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         // Assuming IMU logic is handled before publishing this event
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
+
+        // Stop the timer so it doesn't keep firing outside this state
+        k_timer_stop(&tracking_timer);
     }
 }
 
@@ -131,7 +159,6 @@ static enum smf_state_result evaluation_run(void *o) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ALERT]);
     }
 }
-
 
 
 // --- ALERT (Emergency) ---
