@@ -49,10 +49,24 @@ static struct gpio_callback button_cb_data;
  * INTERRUPT SERVICE ROUTINES (ISRs)
  * ====================================================================== */
 
-static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    /* Keep ISRs fast: Just pack the event and fire it onto ZBUS */
-    struct bracelet_event event = { .type = EVENT_BUTTON_PRESSED };
+static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
+    // Add a static variable to remember the last time the button was pressed
+    static uint32_t last_press_time = 0;
+    uint32_t current_time = k_uptime_get_32();
+
+    // Debounce threshold: 500 milliseconds
+    if (current_time - last_press_time < 500) {
+        // Ignore this interrupt, it's just mechanical bounce
+        return; 
+    }
+    
+    // Update the tracker
+    last_press_time = current_time;
+
+    // Keep ISRs fast: Just pack the event and fire it onto ZBUS
+    struct bracelet_event event = {
+        .type = EVENT_BUTTON_PRESSED
+    };
     zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
 }
 

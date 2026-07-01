@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "events.h"
 #include "sensors.h"
+#include "comms.h"
 
 
 /* Define the ZBUS channel (Message size, subscribers, etc.) */
@@ -16,7 +17,7 @@ ZBUS_CHAN_DEFINE(fsm_events_chan,       /* Name */
 
 /* Define the ZBUS subscriber for the FSM thread */
 // We set a queue size of 4 if the events come faster than it can process
-ZBUS_SUBSCRIBER_DEFINE(fsm_sub, 4);
+ZBUS_MSG_SUBSCRIBER_DEFINE(fsm_sub);
 
 /*===========================*/
 /* Timer for active tracking */
@@ -91,11 +92,15 @@ static void location_ping_entry(void *o) {
 }
 
 static enum smf_state_result location_ping_run(void *o) {
+    printf("[STATE] location_ping_run");
+
     if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
     }
+
+    return SMF_EVENT_HANDLED;
 }
 
 // --- ACTIVE TRACKING ---
@@ -103,8 +108,14 @@ static void active_tracking_entry(void *o) {
     printf("[STATE] Entered ACTIVE_TRACKING. High alert tracking.\n");
     fsm.previous_state = STATE_ACTIVE_TRACKING;
 
-    // Start the timer: First expiry in 3 mins, and periodically every 3 mins after
+    // Start the timer: First expiry in 3 mins, periodically every 3 mins after
     k_timer_start(&tracking_timer, K_MINUTES(3), K_MINUTES(3));
+}
+
+static void active_tracking_exit(void *o) {
+    printf("[STATE] Exiting ACTIVE_TRACKING. Stopping timer.\n");
+    // Stops the timer safely, even if a PANIC or FALL forces the state change
+    k_timer_stop(&tracking_timer);
 }
 
 static enum smf_state_result active_tracking_run(void *o) {
@@ -112,12 +123,10 @@ static enum smf_state_result active_tracking_run(void *o) {
         printf("[ACTIVE TRACKING] 3 Min Timer Expired. Updating location...\n");
         comms_update_localization();
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
-        // Assuming IMU logic is handled before publishing this event
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
-
-        // Stop the timer so it doesn't keep firing outside this state
-        k_timer_stop(&tracking_timer);
     }
+    
+    return SMF_EVENT_HANDLED;
 }
 
 static void do_ml_evaluation_work(struct k_work *work) {
@@ -158,6 +167,8 @@ static enum smf_state_result evaluation_run(void *o) {
     } else if (fsm.current_event.type == EVENT_ML_FALL_DETECTED) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ALERT]);
     }
+
+    return SMF_EVENT_HANDLED;
 }
 
 
@@ -165,13 +176,27 @@ static enum smf_state_result evaluation_run(void *o) {
 static void alert_entry(void *o) {
     printf("[STATE] Entered ALERT! Sending emergency payload to server!\n");
     fsm.previous_state = STATE_ALERT;
-    // TODO: Call comms.c -> update_status(REASON_EMERGENCY)
+    
+    // Turn on the Red LED and Buzzer for immediate local feedback
+    sensors_led_on(LED_RED);
+    sensors_buzzer_on();
+    
+    // Call comms.c to initiate the panic localization and publish
+    comms_send_alert(REASON_BUTTON_PRESSED); 
 }
 
 static enum smf_state_result alert_run(void *o) {
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
+        // Once the server acknowledges, turn off the hardware and sleep
+        sensors_led_off(LED_RED);
+        sensors_buzzer_off();
+        
+        // Clear the panic/fall status so next pings say "ok"
+        comms_clear_alert(); 
+        
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
     }
+    return SMF_EVENT_HANDLED;
 }
 
 
@@ -185,7 +210,7 @@ static enum smf_state_result alert_run(void *o) {
 static const struct smf_state states[] = {
     [STATE_DEEP_SLEEP]      = SMF_CREATE_STATE(deep_sleep_entry, deep_sleep_run, NULL, NULL, NULL),
     [STATE_LOCATION_PING]   = SMF_CREATE_STATE(location_ping_entry, location_ping_run, NULL, NULL, NULL),
-    [STATE_ACTIVE_TRACKING] = SMF_CREATE_STATE(active_tracking_entry, active_tracking_run, NULL, NULL, NULL),
+    [STATE_ACTIVE_TRACKING] = SMF_CREATE_STATE(active_tracking_entry, active_tracking_run, active_tracking_exit, NULL, NULL),
     [STATE_EVALUATION]      = SMF_CREATE_STATE(evaluation_entry, evaluation_run, NULL, NULL, NULL),
     [STATE_ALERT]           = SMF_CREATE_STATE(alert_entry, alert_run, NULL, NULL, NULL),
 };
@@ -202,7 +227,7 @@ void fsm_thread_main(void)
 
     while (1) {
         /* Wait indefinitely for a new event to arrive on ZBUS */
-        if (zbus_sub_wait(&fsm_sub, &chan, K_FOREVER) == 0) {
+        if (zbus_sub_wait_msg(&fsm_sub, &chan, &fsm.current_event, K_FOREVER) == 0) {
             
             /* Read the payload */
             zbus_chan_read(chan, &fsm.current_event, K_NO_WAIT);

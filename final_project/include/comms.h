@@ -20,4 +20,7 @@ void comms_update_localization(void);
  * Sends the emergency status ("fall" or "panic") and forces a location update. */
 void comms_send_alert(enum alert_reason reason);
 
+// Clear the panic/fall status from the variable current_status
+void comms_clear_alert(void); 
+
 #endif /* COMMS_H */
