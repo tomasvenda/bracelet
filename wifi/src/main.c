@@ -1,354 +1,251 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/logging/log.h>
-
 #include <zephyr/net/net_if.h>
-#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_core.h>
+#include <zephyr/net/ethernet.h>
 #include <zephyr/net/wifi_mgmt.h>
-#include <zephyr/net/wifi_utils.h>
+#include <zephyr/net/net_event.h>
 
-#include <string.h>
-#include <stdio.h>
-#include <errno.h>
+LOG_MODULE_REGISTER(wifi_diag, LOG_LEVEL_DBG);
 
-LOG_MODULE_REGISTER(wifi_app, LOG_LEVEL_DBG);
+#define HOST_IRQ_PIN 16
+#define WIFI_CS_PIN  12
 
-static uint32_t scan_result_count;
-static struct net_mgmt_event_callback wifi_mgmt_cb;
+static const struct device *ldo1_dev   = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldsw1));
+static const struct device *gpio0_dev  = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+
+/* ---------------------------------------------------------------
+ * Scan state
+ * ------------------------------------------------------------- */
+static struct net_mgmt_event_callback wifi_cb;
+static volatile int networks_found = 0;
+
 K_SEM_DEFINE(scan_sem, 0, 1);
 
-static const struct device *gpio0_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-static const struct device *spi3_dev  = DEVICE_DT_GET(DT_NODELABEL(spi3));
+/* Forward declaration - must come before check_wifi_scan */
+static void wifi_event_handler(struct net_mgmt_event_callback *cb,
+                               uint64_t mgmt_event,
+                               struct net_if *iface);
 
-static void format_mac(const uint8_t *mac, char *buf, size_t len)
+/* ---------------------------------------------------------------
+ * STEP 1 - Device readiness
+ * ------------------------------------------------------------- */
+static void check_devices(void)
 {
-	snprintk(buf, len, "%02X:%02X:%02X:%02X:%02X:%02X",
-		 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    LOG_INF("--- STEP 1: Device Readiness ---");
+
+    if (!device_is_ready(ldo1_dev)) {
+        LOG_ERR("[FAIL] nPM1300 LDO1 not ready. Check I2C: SDA=P0.09 SCL=P0.08");
+    } else {
+        LOG_INF("[OK]   nPM1300 LDO1 device ready.");
+    }
+
+    if (!device_is_ready(gpio0_dev)) {
+        LOG_ERR("[FAIL] GPIO0 not ready.");
+    } else {
+        LOG_INF("[OK]   GPIO0 device ready.");
+    }
 }
 
-static void wifi_en_selftest(void)
+/* ---------------------------------------------------------------
+ * STEP 2 - Power rail
+ * ------------------------------------------------------------- */
+static void check_power(void)
 {
-	int ret;
+    LOG_INF("--- STEP 2: Power Rails ---");
 
-	printk("=== WIFI_EN selftest on P0.17 ===\n");
+    if (!device_is_ready(ldo1_dev)) {
+        LOG_ERR("[SKIP] LDO1 not ready.");
+        return;
+    }
 
-	if (!device_is_ready(gpio0_dev)) {
-		printk("GPIO0 not ready\n");
-		return;
-	}
-
-	ret = gpio_pin_configure(gpio0_dev, 17, GPIO_OUTPUT_INACTIVE);
-	printk("WIFI_EN configure P0.17 ret=%d\n", ret);
-
-	ret = gpio_pin_set(gpio0_dev, 17, 0);
-	printk("WIFI_EN set low ret=%d\n", ret);
-	k_sleep(K_MSEC(20));
-
-	ret = gpio_pin_set(gpio0_dev, 17, 1);
-	printk("WIFI_EN set high ret=%d\n", ret);
-	k_sleep(K_MSEC(20));
-
-	ret = gpio_pin_set(gpio0_dev, 17, 1);
-	printk("WIFI_EN hold high ret=%d\n", ret);
-	k_sleep(K_MSEC(20));
+    if (regulator_is_enabled(ldo1_dev)) {
+        LOG_INF("[OK]   LDO1 ON -> nRF7002 VDDMAIN should be 3.3V.");
+        LOG_INF("       Multimeter: measure nRF7002 VDDMAIN vs GND, expect ~3.3V.");
+    } else {
+        LOG_ERR("[FAIL] LDO1 OFF -> nRF7002 has no power. Check PMIC I2C and DT config.");
+    }
 }
 
-static void spi_loopback_test(void)
+/* ---------------------------------------------------------------
+ * STEP 3 - SPI CS idle state
+ * ------------------------------------------------------------- */
+static void check_spi_cs(void)
 {
-	int ret;
-	uint8_t tx_buf[] = { 0xAB, 0xCD, 0xEF, 0x42 };
-	uint8_t rx_buf[sizeof(tx_buf)] = { 0 };
+    LOG_INF("--- STEP 3: SPI CS (P0.12) ---");
 
-	struct spi_buf tx = {
-		.buf = tx_buf,
-		.len = sizeof(tx_buf),
-	};
+    if (!device_is_ready(gpio0_dev)) {
+        LOG_ERR("[SKIP] GPIO0 not ready.");
+        return;
+    }
 
-	struct spi_buf rx = {
-		.buf = rx_buf,
-		.len = sizeof(rx_buf),
-	};
+    gpio_pin_configure(gpio0_dev, WIFI_CS_PIN, GPIO_INPUT);
+    int val = gpio_pin_get(gpio0_dev, WIFI_CS_PIN);
 
-	struct spi_buf_set tx_set = {
-		.buffers = &tx,
-		.count = 1,
-	};
-
-	struct spi_buf_set rx_set = {
-		.buffers = &rx,
-		.count = 1,
-	};
-
-	struct spi_config cfg = {
-		.frequency = 1000000,
-		.operation = SPI_OP_MODE_MASTER |
-			     SPI_WORD_SET(8) |
-			     SPI_TRANSFER_MSB |
-			     SPI_LINES_SINGLE,
-		.slave = 0,
-		.cs = { 0 },
-	};
-
-	printk("=== SPI3 loopback selftest ===\n");
-	printk("NOTE: Temporarily short MOSI(P0.14) to MISO(P0.15) for this test.\n");
-
-	if (!device_is_ready(spi3_dev)) {
-		printk("SPI3 not ready\n");
-		return;
-	}
-
-	ret = spi_transceive(spi3_dev, &cfg, &tx_set, &rx_set);
-
-	printk("SPI loopback ret=%d\n", ret);
-	printk("TX: %02X %02X %02X %02X\n",
-	       tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3]);
-	printk("RX: %02X %02X %02X %02X\n",
-	       rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
-
-	if (ret == 0 && memcmp(tx_buf, rx_buf, sizeof(tx_buf)) == 0) {
-		printk("SPI loopback PASSED\n");
-	} else if (ret == 0) {
-		printk("SPI loopback DATA MISMATCH\n");
-	} else {
-		printk("SPI loopback FAILED\n");
-	}
+    if (val == 1) {
+        LOG_INF("[OK]   P0.12 HIGH at idle. Correct (active-low CS).");
+        LOG_INF("       Multimeter: measure P0.12 vs GND, expect ~1.8V at idle.");
+    } else {
+        LOG_ERR("[FAIL] P0.12 LOW at idle. CS should be HIGH when idle.");
+        LOG_ERR("       Check for short or bus conflict on P0.12.");
+    }
 }
 
-static void print_iface_cb(struct net_if *iface, void *user_data)
+/* ---------------------------------------------------------------
+ * STEP 4 - Wi-Fi driver and MAC address
+ * ------------------------------------------------------------- */
+static void check_wifi_driver(void)
 {
-	ARG_UNUSED(user_data);
+    LOG_INF("--- STEP 4: Wi-Fi Driver and MAC Address ---");
 
-	const struct device *dev = net_if_get_device(iface);
-	const char *dev_name = dev ? dev->name : "<no-dev>";
-	int index = net_if_get_by_iface(iface);
+    struct net_if *iface = net_if_get_first_by_type(&NET_L2_GET_NAME(ETHERNET));
 
-	printk("iface[%d]: dev=%s, up=%d, dormant=%d\n",
-	       index,
-	       dev_name,
-	       net_if_is_up(iface),
-	       net_if_is_dormant(iface));
+    if (!iface) {
+        LOG_ERR("[FAIL] No Wi-Fi net_if found. Possible causes:");
+        LOG_ERR("  1. CONFIG_WIFI_NRF70=y missing");
+        LOG_ERR("  2. CONFIG_NET_L2_ETHERNET=y missing");
+        LOG_ERR("  3. nRF7002 DT node not okay");
+        LOG_ERR("  4. OTP MAC blank - flash wifi_radio_ficr_prog sample");
+        LOG_ERR("  5. SPI wiring wrong: SCK=P0.13 MOSI=P0.14 MISO=P0.15 CS=P0.12");
+        return;
+    }
+
+    LOG_INF("[OK]   Wi-Fi net_if found (index=%d).", net_if_get_by_iface(iface));
+
+    struct net_linkaddr *mac = net_if_get_link_addr(iface);
+
+    if (mac && mac->len >= 6) {
+        LOG_INF("[OK]   MAC read over SPI: %02X:%02X:%02X:%02X:%02X:%02X",
+                mac->addr[0], mac->addr[1], mac->addr[2],
+                mac->addr[3], mac->addr[4], mac->addr[5]);
+        LOG_INF("       SPI bus confirmed working. RPU firmware loaded.");
+
+        bool blank = true;
+        for (int i = 0; i < 6; i++) {
+            if (mac->addr[i] != 0xFF) {
+                blank = false;
+                break;
+            }
+        }
+        if (blank) {
+            LOG_WRN("[WARN] MAC is FF:FF:FF:FF:FF:FF -> OTP not programmed.");
+            LOG_WRN("       Use wifi_radio_ficr_prog to write MAC to nRF7002 OTP.");
+        }
+    } else {
+        LOG_WRN("[WARN] Driver loaded but MAC empty. OTP may be blank.");
+    }
 }
 
-static struct net_if *find_wifi_iface(void)
+/* ---------------------------------------------------------------
+ * STEP 5 - Wi-Fi scan (RF proof of life)
+ * ------------------------------------------------------------- */
+static void wifi_event_handler(struct net_mgmt_event_callback *cb,
+                               uint64_t mgmt_event,
+                               struct net_if *iface)
 {
-	struct net_if *iface = net_if_get_default();
+    if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
+        const struct wifi_scan_result *entry =
+            (const struct wifi_scan_result *)cb->info;
+        networks_found++;
+        LOG_INF("  [SCAN] #%02d  SSID=%-32s  RSSI=%4d dBm  CH=%d",
+                networks_found,
+                entry->ssid_length ? (const char *)entry->ssid : "<hidden>",
+                entry->rssi,
+                entry->channel);
 
-	if (!iface) {
-		printk("SANITY: net_if_get_default() returned NULL\n");
-		return NULL;
-	}
-
-	if (strcmp(net_if_get_device(iface)->name, "wlan0") != 0) {
-		printk("SANITY: default iface is not wlan0, it is %s\n",
-		       net_if_get_device(iface)->name);
-	}
-
-	return iface;
+    } else if (mgmt_event == NET_EVENT_WIFI_SCAN_DONE) {
+        const struct wifi_status *status =
+            (const struct wifi_status *)cb->info;
+        if (status && status->status) {
+            LOG_ERR("[FAIL] Scan done with error: %d", status->status);
+        } else {
+            LOG_INF("[OK]   Scan complete. Networks found: %d", networks_found);
+            if (networks_found == 0) {
+                LOG_WRN("[WARN] No APs found. Check antenna and 40MHz crystal.");
+            }
+        }
+        k_sem_give(&scan_sem);
+    }
 }
 
-static void dump_wifi_status(struct net_if *iface)
+static void check_wifi_scan(void)
 {
-	struct wifi_iface_status status = {0};
-	int ret;
+    LOG_INF("--- STEP 5: Wi-Fi Scan (RF Proof-of-Life) ---");
 
-	if (!iface) {
-		printk("SANITY: dump_wifi_status called with NULL iface\n");
-		return;
-	}
+    struct net_if *iface = net_if_get_first_by_type(&NET_L2_GET_NAME(ETHERNET));
 
-	ret = net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status));
-	if (ret) {
-		printk("SANITY: NET_REQUEST_WIFI_IFACE_STATUS failed: %d\n", ret);
-		return;
-	}
+    if (!iface) {
+        LOG_ERR("[SKIP] No Wi-Fi interface. Skipping scan.");
+        return;
+    }
 
-	printk("Wi-Fi status:\n");
-	printk("  state=%s\n", wifi_state_txt(status.state));
-	printk("  rssi=%d\n", status.rssi);
-	printk("  band=%u\n", status.band);
-	printk("  channel=%u\n", status.channel);
-	printk("  security=%u\n", status.security);
-	printk("  iface_mode=%u\n", status.iface_mode);
-	printk("  link_mode=%u\n", status.link_mode);
+    networks_found = 0;
+
+    net_mgmt_init_event_callback(&wifi_cb, wifi_event_handler,
+                                 NET_EVENT_WIFI_SCAN_RESULT |
+                                 NET_EVENT_WIFI_SCAN_DONE);
+    net_mgmt_add_event_callback(&wifi_cb);
+
+    struct wifi_scan_params params = { 0 };
+
+    LOG_INF("       Triggering scan...");
+    int ret = net_mgmt(NET_REQUEST_WIFI_SCAN, iface,
+                       &params, sizeof(struct wifi_scan_params));
+    if (ret) {
+        LOG_ERR("[FAIL] Scan request failed (err=%d).", ret);
+        net_mgmt_del_event_callback(&wifi_cb);
+        return;
+    }
+
+    if (k_sem_take(&scan_sem, K_SECONDS(15)) != 0) {
+        LOG_ERR("[FAIL] Scan timed out after 15s.");
+        LOG_ERR("       Check: 40MHz crystal, antenna, VDDMAIN=3.3V.");
+    }
+
+    net_mgmt_del_event_callback(&wifi_cb);
 }
 
-static void handle_wifi_scan_result(const struct net_mgmt_event_callback *cb)
-{
-	const struct wifi_scan_result *entry = (const struct wifi_scan_result *)cb->info;
-	char ssid_print[WIFI_SSID_MAX_LEN + 1];
-	char mac_buf[18];
-	int ssid_len;
-
-	if (!entry) {
-		printk("SANITY: scan result callback with NULL entry\n");
-		return;
-	}
-
-	scan_result_count++;
-
-	if (scan_result_count == 1U) {
-		printk("\n%-4s | %-32s | %-4s | %-4s | %-5s | %s\n",
-		       "Num", "SSID", "Chan", "RSSI", "Sec", "BSSID");
-		printk("------------------------------------------------------------------------------\n");
-	}
-
-	ssid_len = MIN(entry->ssid_length, WIFI_SSID_MAX_LEN);
-	memcpy(ssid_print, entry->ssid, ssid_len);
-	ssid_print[ssid_len] = '\0';
-
-	format_mac(entry->mac, mac_buf, sizeof(mac_buf));
-
-	printk("%-4u | %-32s | %-4u | %-4d | %-5s | %s\n",
-	       scan_result_count,
-	       ssid_print,
-	       entry->channel,
-	       entry->rssi,
-	       wifi_security_txt(entry->security),
-	       mac_buf);
-}
-
-static void handle_wifi_scan_done(const struct net_mgmt_event_callback *cb)
-{
-	const struct wifi_status *status = (const struct wifi_status *)cb->info;
-
-	if (status) {
-		printk("Scan done event: status=%d\n", status->status);
-	} else {
-		printk("Scan done event with NULL status info\n");
-	}
-
-	k_sem_give(&scan_sem);
-}
-
-static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
-				    uint64_t mgmt_event,
-				    struct net_if *iface)
-{
-	ARG_UNUSED(cb);
-
-	printk("MGMT event: 0x%llx on iface=%d\n",
-	       mgmt_event,
-	       iface ? net_if_get_by_iface(iface) : -1);
-
-	if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
-		handle_wifi_scan_result(cb);
-	} else if (mgmt_event == NET_EVENT_WIFI_SCAN_DONE) {
-		handle_wifi_scan_done(cb);
-	}
-}
-
-static int wifi_scan(void)
-{
-	struct net_if *iface = find_wifi_iface();
-	struct wifi_scan_params params = {0};
-	int ret;
-
-	if (!iface) {
-		return -ENOENT;
-	}
-
-	dump_wifi_status(iface);
-
-	{
-		char bands_list[] = CONFIG_WIFI_SCAN_BANDS_LIST;
-
-		if (strlen(bands_list) > 0) {
-			printk("Scanning bands: %s\n", bands_list);
-			ret = wifi_utils_parse_scan_bands(bands_list, &params.bands);
-			if (ret) {
-				printk("SANITY: wifi_utils_parse_scan_bands failed: %d\n", ret);
-				return ret;
-			}
-		}
-	}
-
-	params.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-	params.dwell_time_active = CONFIG_WIFI_SCAN_DWELL_TIME_ACTIVE;
-	params.dwell_time_passive = CONFIG_WIFI_SCAN_DWELL_TIME_PASSIVE;
-
-	scan_result_count = 0;
-
-	printk("Starting Wi-Fi scan on iface=%d...\n", net_if_get_by_iface(iface));
-
-	ret = net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params));
-	if (ret) {
-		printk("ERROR: NET_REQUEST_WIFI_SCAN failed: %d\n", ret);
-		printk("SANITY: likely causes are nRF7002 init failure, enable pin, SPI, or IRQ.\n");
-		return ret;
-	}
-
-	ret = k_sem_take(&scan_sem, K_SECONDS(20));
-	if (ret) {
-		printk("ERROR: Timed out waiting for scan completion: %d\n", ret);
-		return ret;
-	}
-
-	printk("Scan finished. Found %u networks.\n", scan_result_count);
-	return 0;
-}
-
+/* ---------------------------------------------------------------
+ * MAIN
+ * ------------------------------------------------------------- */
 int main(void)
 {
-	struct net_if *def = net_if_get_default();
-	struct net_if *wifi = NULL;
+    k_sleep(K_SECONDS(3));
 
-	wifi_en_selftest();
-	spi_loopback_test();
+    LOG_INF("==============================================");
+    LOG_INF("     nRF7002 HARDWARE DIAGNOSTIC TOOL        ");
+    LOG_INF("==============================================");
+    LOG_INF("Pins: SCK=P0.13 MOSI=P0.14 MISO=P0.15 CS=P0.12");
+    LOG_INF("      BUCKEN (HARDWIRED TO 1.8V) IRQ=P0.16 FlashCS=P0.10");
+    LOG_INF("==============================================");
 
-	printk("\n*** nRF9151 + nRF7002 Wi-Fi scan sanity app ***\n");
+    check_devices();
+    k_sleep(K_MSEC(200));
 
-#if DT_NODE_EXISTS(DT_NODELABEL(nrf70))
-	printk("DT sanity: nrf70 node exists.\n");
-#else
-	printk("DT sanity: nrf70 node NOT found.\n");
-#endif
+    check_power();
+    k_sleep(K_MSEC(200));
 
-#if DT_NODE_EXISTS(DT_NODELABEL(wlan0))
-	printk("DT sanity: wlan0 node exists.\n");
-#else
-	printk("DT sanity: wlan0 node NOT found.\n");
-#endif
+    check_spi_cs();
+    k_sleep(K_MSEC(200));
 
-	printk("Enumerating network interfaces...\n");
-	net_if_foreach(print_iface_cb, NULL);
+    LOG_INF("Waiting 5s for nRF7002 RPU firmware load...");
+    k_sleep(K_SECONDS(5));
 
-	if (def) {
-		const struct device *dev = net_if_get_device(def);
-		printk("Default iface=%d dev=%s\n",
-		       net_if_get_by_iface(def),
-		       dev ? dev->name : "<no-dev>");
-	} else {
-		printk("SANITY: net_if_get_default() returned NULL\n");
-	}
+    check_wifi_driver();
+    k_sleep(K_MSEC(500));
 
-	wifi = find_wifi_iface();
-	if (!wifi) {
-		printk("FATAL: No Wi-Fi iface available. Retrying every 10s.\n");
-	} else {
-		printk("Wi-Fi iface selected: index=%d dev=%s\n",
-		       net_if_get_by_iface(wifi),
-		       net_if_get_device(wifi)->name);
-		dump_wifi_status(wifi);
-	}
+    check_wifi_scan();
 
-	net_mgmt_init_event_callback(&wifi_mgmt_cb,
-				     wifi_mgmt_event_handler,
-				     NET_EVENT_WIFI_SCAN_RESULT |
-				     NET_EVENT_WIFI_SCAN_DONE);
-	net_mgmt_add_event_callback(&wifi_mgmt_cb);
+    LOG_INF("==============================================");
+    LOG_INF(" DIAGNOSTIC COMPLETE.");
+    LOG_INF("==============================================");
 
-	while (1) {
-		int ret = wifi_scan();
+    while (1) {
+        k_sleep(K_FOREVER);
+    }
 
-		if (ret) {
-			printk("wifi_scan() failed: %d\n", ret);
-		}
-
-		k_sleep(K_SECONDS(CONFIG_WIFI_SCAN_INTERVAL_S));
-	}
-
-	return 0;
+    return 0;
 }
