@@ -49,10 +49,24 @@ static struct gpio_callback button_cb_data;
  * INTERRUPT SERVICE ROUTINES (ISRs)
  * ====================================================================== */
 
-static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    /* Keep ISRs fast: Just pack the event and fire it onto ZBUS */
-    struct bracelet_event event = { .type = EVENT_BUTTON_PRESSED };
+static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
+    // Add a static variable to remember the last time the button was pressed
+    static uint32_t last_press_time = 0;
+    uint32_t current_time = k_uptime_get_32();
+
+    // Debounce threshold: 500 milliseconds
+    if (current_time - last_press_time < 500) {
+        // Ignore this interrupt, it's just mechanical bounce
+        return; 
+    }
+    
+    // Update the tracker
+    last_press_time = current_time;
+
+    // Keep ISRs fast: Just pack the event and fire it onto ZBUS
+    struct bracelet_event event = {
+        .type = EVENT_BUTTON_PRESSED
+    };
     zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
 }
 
@@ -356,4 +370,26 @@ void sensors_buzzer_off(void)
 {
     pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD,
             0U, PWM_POLARITY_NORMAL);
+}
+
+// Disables the motion interrupts
+void sensors_disable_motion_trigger(void) {
+    if (bmi_dev == NULL) return;
+    
+    // Safely unset the handler to stop Zephyr from firing the callback
+    sensor_trigger_set(bmi_dev, &imu_motion_trig, NULL);
+    LOG_INF("IMU light motion trigger disabled.");
+}
+
+// Enables the motion interrupt
+void sensors_enable_motion_trigger(void) {
+    if (bmi_dev == NULL) return;
+    
+    // Re-arm the handler using the same trigger struct from initialization
+    int ret = sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
+    if (ret) {
+        LOG_ERR("Failed to re-enable motion trigger: %d", ret);
+    } else {
+        LOG_INF("IMU light motion trigger enabled.");
+    }
 }

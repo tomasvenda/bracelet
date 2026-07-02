@@ -187,15 +187,15 @@ static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf
 
     /* 2. ZBUS FSM Events (if the payload is JSON) */
     struct bracelet_event event;
-    if (strstr(buf, "\"status\":\"stationary\"")) {
-        event.type = EVENT_SERVER_REPLY_STATIONARY;
+    if (strstr(buf, "located_home")) {
+        event.type = EVENT_SERVER_REPLY_HOME;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     } 
-    else if (strstr(buf, "\"status\":\"moved\"")) {
-        event.type = EVENT_SERVER_REPLY_MOVED;
+    else if (strstr(buf, "located_away")) {
+        event.type = EVENT_SERVER_REPLY_AWAY;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     }
-    else if (strstr(buf, "\"ack\":true")) {
+    else if (strstr(buf, "\"ack\": true")) {
         event.type = EVENT_SERVER_ACK_ALERT;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
     }
@@ -407,7 +407,6 @@ static void perform_localization_work(struct k_work *work)
 
         /* 4. If successful, end the function completely */
         if (wifi_successful) {
-            current_status = "ok";
             return; 
         }
     }
@@ -459,9 +458,6 @@ static void perform_localization_work(struct k_work *work)
     if (lte_mqtt_publish_str(payload) != 0) {
         LOG_ERR("Failed to publish! (TODO: Save to SPI Flash NVS here)");
     }
-
-    /* Reset status back to OK */
-    current_status = "ok";
 }
 K_WORK_DEFINE(loc_work, perform_localization_work);
 
@@ -470,8 +466,13 @@ K_WORK_DEFINE(loc_work, perform_localization_work);
  * ------------------------------------------------------------------ */
 void comms_update_localization(void)
 {
-    current_status = "ok";
+    //current_status = "ok";
     k_work_submit(&loc_work);
+}
+
+// Clears the current status from alert
+void comms_clear_alert(void) {
+    current_status = "ok";
 }
 
 void comms_send_alert(enum alert_reason reason)
