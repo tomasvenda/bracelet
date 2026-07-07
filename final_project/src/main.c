@@ -20,13 +20,17 @@ int main(void)
         printf("[FATAL] Sensor initialization failed! Check PMIC/I2C.\n");
         return -1;
     }
+    
+    //DEBUGGING
+    //printf("DOING ONE WIFI SCAN HERE");
+    //do_wifi_scan();
 
     /* 2. Initialize Modem, LTE, and MQTT */
     if (comms_init() != 0) {
         printf("[FATAL] Communications initialization failed! Check SIM/Antenna.\n");
         return -1;
     }
-
+    
     printf("========================================\n");
     printf("        SYSTEM BOOT COMPLETE            \n");
     printf("   FSM is now listening for events.     \n");

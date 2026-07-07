@@ -39,55 +39,89 @@ config WIFI_SCAN_DWELL_TIME_ACTIVE
     default 50
     range 5 1000
 
-config WIFI_SCAN_DWELL_TIME_PASSIVE
-    int "Passive scan dwell time"
-    default 130
-    range 10 1000
+config WIFI_SCAN_DWELL_TIME_ACTIVE
+	int "Active scan dwell time"
+	default 50
+	range 5 1000
+	help
+	  Active scan dwell time (in ms) per channel.
 
+config WIFI_SCAN_DWELL_TIME_PASSIVE
+	int "Passive scan dwell time"
+	default 130
+	range 10 1000
+	help
+	  Passive scan dwell time (in ms) per channel.
+
+# Hidden options to select the scan type
 config WIFI_SCAN_TYPE_ACTIVE
-    bool
+	bool
 
 config WIFI_SCAN_TYPE_PASSIVE
-    bool
+	bool
 
 choice
-    prompt "Choose a WiFi Scan Profile"
+	prompt "Choose a WiFi Scan Profile"
 
 config WIFI_SCAN_PROFILE_DEFAULT
-    bool "Scan in all bands and channels"
+	bool "Scan in all bands and channels"
+	help
+	  Enable this profile to do Wi-Fi scan in all supported bands and channels.
 
 config WIFI_SCAN_PROFILE_ACTIVE
-    bool "Active scan"
-    select WIFI_SCAN_TYPE_ACTIVE
+	bool "Active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to do active scan where allowed.
 
 config WIFI_SCAN_PROFILE_PASSIVE
-    bool "Passive scan"
-    select WIFI_SCAN_TYPE_PASSIVE
+	bool "Passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to do passive scan on all channels.
 
 config WIFI_SCAN_PROFILE_2_4GHz_ACTIVE
-    bool "Scan in the 2.4 GHz band using active scan"
-    select WIFI_SCAN_TYPE_ACTIVE
+	bool "Scan in the 2.4 GHz band using active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to scan in the 2.4 GHz band using active scanning where allowed.
 
 config WIFI_SCAN_PROFILE_2_4GHz_PASSIVE
-    bool "Scan in the 2.4 GHz band using passive scan"
-    select WIFI_SCAN_TYPE_PASSIVE
+	bool "Scan in the 2.4 GHz band using passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to scan in the 2.4 GHz band using passive scanning.
 
 config WIFI_SCAN_PROFILE_5GHz_ACTIVE
-    bool "Scan in the 5 GHz band using active scan"
-    select WIFI_SCAN_TYPE_ACTIVE
+	bool "Scan in the 5 GHz band using active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to do active scan in the 5 GHz band.
 
 config WIFI_SCAN_PROFILE_5GHz_PASSIVE
-    bool "Scan in the 5 GHz band using passive scan"
-    select WIFI_SCAN_TYPE_PASSIVE
+	bool "Scan in the 5 GHz band using passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to do passive scan in the 5 GHz band.
 
 config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_CHAN
-    bool "Scan only non-overlapping channels"
+	bool "Scan only non-overlapping channels"
+	help
+	  Enable this profile to scan only non-overlapping channels (1, 6, 11)
+	  in the 2.4 GHz band.
 
 config WIFI_SCAN_PROFILE_5GHz_NON_DFS_CHAN
-    bool "Scan only non-DFS channels"
+	bool "Scan only non-DFS channels"
+	help
+	  Enable this profile to scan only non-DFS channels (36, 40, 44,
+	  48, 149, 153, 157, 161, 165) in the 5 GHz band.
 
-config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHz_NON_DFS_CHAN
-    bool "Scan only non-overlapping and non-DFS channels"
+config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHZ_NON_DFS_CHAN
+	bool "Scan only non-overlapping and non-DFS channels"
+	help
+	  Enable this profile to scan only non-overlapping and non-DFS channels
+	  (1, 6, 11) in the 2.4 GHz band and non-DFS channels
+	  (36, 40, 44, 48, 149, 153, 157, 161, 165) in the 5 GHz band.
 
 endchoice
 

@@ -1,3 +1,5 @@
+#include <zephyr/dt-bindings/regulator/npm13xx.h>
+
 &pinctrl {
     /* --- UART0 --- */
     uart0_default: uart0_default {
@@ -85,21 +87,6 @@
         npm1300_regulators: regulators {
             compatible = "nordic,npm1300-regulator";
             status = "okay"; /* Enable the regulator subsystem */
-
-            npm1300_ldo1: LDO1 {
-                regulator-boot-on;
-            };
-
-            npm1300_ldo2: LDO2 {
-                /* Set the voltage to 1.8V */
-                regulator-min-microvolt = <1800000>;
-                regulator-max-microvolt = <1800000>;
-                regulator-init-microvolt = <1800000>;
-
-                /* Force early power-on during boot */
-                regulator-boot-on;
-                regulator-always-on;
-            };
         };
 
         npm1300_charger: charger {
@@ -146,6 +133,27 @@
     };
 };
 
+&npm1300_regulators {
+    npm1300_ldo1: LDO1 {
+        status = "okay";
+        /* Fixed: Lowered to 1.8V to match nRF9151 GPIO logic levels */
+        regulator-min-microvolt = <1800000>;
+        regulator-max-microvolt = <1800000>;
+        regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
+        active-discharge;
+        regulator-boot-on;
+        regulator-always-on;
+    };
+
+        npm1300_ldo2: LDO2 {
+        /* Set the voltage to 1.8V */
+        regulator-min-microvolt = <1800000>;
+        regulator-max-microvolt = <1800000>;
+        regulator-init-microvolt = <1800000>;        /* Force early power-on during boot */
+        regulator-boot-on;
+        regulator-always-on;
+    };
+};
 &spi3 {
     status = "okay";
     pinctrl-0 = <&spi3_default>;
@@ -161,48 +169,37 @@
         reg = <0>;
         spi-max-frequency = <8000000>;
         size = <33554432>;
-        jedec-id = [c2 25 36];
+        jedec-id = [ef 60 17];
     };
 
-	nrf70: wifi@1 {
-		compatible = "nordic,nrf7002-spi";
-		reg = <1>;
-		status = "okay";
+	nrf70: nrf7002@0 {
+        compatible = "nordic,nrf7002-spi";
+        status = "okay";
+        reg = <1>;
+        spi-max-frequency = <DT_FREQ_M(8)>;
+        iovdd-power-up-delay-ms = <1>;
 
-		/*
-		 * 8 MHz is the safe minimum for RPU FW loading.
-		 * nRF7002 supports up to 40 MHz — increase only after
-		 * initial bring-up is confirmed working.
-		 */
-		spi-max-frequency = <8000000>;
-		duplex = <0>;        /* SPI_FULL_DUPLEX */
-		frame-format = <0>;  /* SPI_FRAME_FORMAT_MOTOROLA */
+        bucken-gpios    = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+        iovdd-ctrl-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+        iovdd-regulator = <&npm1300_ldo1>;
+        host-irq-gpios  = <&gpio0 16 GPIO_ACTIVE_HIGH>;
 
-		/* BUCKEN = WIFI_ENABLE on your schematic, drives VDD_BUCK rail */
-		bucken-gpios   = <&gpio0 17 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
-		/* HOST_IRQ = IRQ net on your schematic */
-		host-irq-gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+        nordic_wlan0: wlan0 {
+            compatible = "nordic,wlan";
+            local-mac-address = [F6 CE 36 00 00 01];
+        };
 
-		/* IOVDD supplied by the always-on 1V8_SW regulator */
-		iovdd-regulator         = <&reg_1v8_sw>;
-		iovdd-power-up-delay-ms = <50>;
-
-		/* Max TX power (dBm) — conservative defaults, tune after bring-up */
-		wifi-max-tx-pwr-2g-dsss      = <16>;
-		wifi-max-tx-pwr-2g-mcs0      = <16>;
-		wifi-max-tx-pwr-2g-mcs7      = <15>;
-		wifi-max-tx-pwr-5g-low-mcs0  = <14>;
-		wifi-max-tx-pwr-5g-low-mcs7  = <13>;
-		wifi-max-tx-pwr-5g-mid-mcs0  = <14>;
-		wifi-max-tx-pwr-5g-mid-mcs7  = <13>;
-		wifi-max-tx-pwr-5g-high-mcs0 = <14>;
-		wifi-max-tx-pwr-5g-high-mcs7 = <13>;
-
-		wlan0: wlan0 {
-			compatible = "nordic,wlan";
-			status = "okay";  /* REQUIRED in NCS 3.x */
-		};
-	};
+        /* TX power properties - REDUCED FOR BATTERY */
+        wifi-max-tx-pwr-2g-dsss = <10>;         // Was 21 → Now 10 dBm
+        wifi-max-tx-pwr-2g-mcs0 = <8>;          // Was 16 → Now 8 dBm
+        wifi-max-tx-pwr-2g-mcs7 = <8>;          // Was 16 → Now 8 dBm
+        wifi-max-tx-pwr-5g-low-mcs0 = <6>;      // Was 9 → Now 6 dBm
+        wifi-max-tx-pwr-5g-low-mcs7 = <6>;      // Was 9 → Now 6 dBm
+        wifi-max-tx-pwr-5g-mid-mcs0 = <8>;      // Was 11 → Now 8 dBm
+        wifi-max-tx-pwr-5g-mid-mcs7 = <8>;      // Was 11 → Now 8 dBm
+        wifi-max-tx-pwr-5g-high-mcs0 = <10>;    // Was 13 → Now 10 dBm
+        wifi-max-tx-pwr-5g-high-mcs7 = <10>;    // Was 13 → Now 10 dBm
+    };
 };
 
 / {
@@ -276,7 +273,8 @@
 	};
 
 	chosen {
-		zephyr,wifi = &wlan0;
+		zephyr,wifi = &nordic_wlan0;
+        ncs,location-wifi = &nordic_wlan0;
 	};
 };
 

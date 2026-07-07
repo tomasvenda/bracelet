@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <zephyr/net/ethernet.h>
+#include <zephyr/net/net_mgmt.h>
+#include <nrf_modem_at.h>
+
 
 #include "events.h"
 #include "comms.h"
@@ -69,9 +73,10 @@ static const char *current_status = "ok";
 
 #define MAX_APS_PER_SCAN 10
 static struct ap_data_t { char mac[18]; int8_t rssi; } best_aps[MAX_APS_PER_SCAN];
-static uint8_t current_ap_count = 0;
 static struct nrf_modem_gnss_pvt_data_frame last_pvt;
 static bool gnss_has_fix = false;
+static uint32_t current_ap_count;  // Number of AP's that are confirmed and stored
+static uint32_t scan_result;    // Number of AP's reported during a scan
 
 /* Dummy battery function - Replace with actual ADC logic later */
 static int get_battery_level(void) { return 85; }
@@ -79,41 +84,80 @@ static int get_battery_level(void) { return 85; }
 /* ------------------------------------------------------------------
  * EVENT HANDLERS (WIFI & GNSS)
  * ------------------------------------------------------------------ */
-static void handle_wifi_scan_result(struct net_mgmt_event_callback *cb)
+
+/*---------------------------------------------------------------
+ * Wi-Fi event handler
+ *
+ * This function is called automatically by Zephyr whenever a
+ * registered Wi-Fi management event occurs.
+ *--------------------------------------------------------------*/
+static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *iface)
 {
-    const struct wifi_scan_result *entry = (const struct wifi_scan_result *)cb->info;
-    char mac_string_buf[18];
+    switch (mgmt_event) {
 
-    snprintf(mac_string_buf, sizeof(mac_string_buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-             entry->mac[0], entry->mac[1], entry->mac[2], 
-             entry->mac[3], entry->mac[4], entry->mac[5]);
+    case NET_EVENT_WIFI_SCAN_RESULT:
+    {
+        const struct wifi_scan_result *entry =
+            (const struct wifi_scan_result *)cb->info;
 
-    for (int i = 0; i < current_ap_count; i++) {
-        if (strcmp(best_aps[i].mac, mac_string_buf) == 0) return; /* Ignore duplicates */
+        scan_result++;
+
+        LOG_INF("[%02d] BSSID=%02X:%02X:%02X:%02X:%02X:%02X  RSSI=%d dBm  CH=%d  SSID=%s",
+            scan_result,
+            entry->mac[0],
+            entry->mac[1],
+            entry->mac[2],
+            entry->mac[3],
+            entry->mac[4],
+            entry->mac[5],
+            entry->rssi,
+            entry->channel,
+            entry->ssid);
+        
+        /* Save the MAC and RSSI for the MQTT payload */
+        char mac_string_buf[18];
+        snprintf(mac_string_buf, sizeof(mac_string_buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 entry->mac[0], entry->mac[1], entry->mac[2], 
+                 entry->mac[3], entry->mac[4], entry->mac[5]);
+
+        /* Prevent duplicates and store top 10 strongest signals */
+        bool duplicate = false;
+        for (int i = 0; i < current_ap_count; i++) {
+            if (strcmp(best_aps[i].mac, mac_string_buf) == 0) duplicate = true;
+        }
+
+        if (!duplicate) {
+            if (current_ap_count < MAX_APS_PER_SCAN) {
+                strcpy(best_aps[current_ap_count].mac, mac_string_buf);
+                best_aps[current_ap_count].rssi = entry->rssi;
+                current_ap_count++;
+            } else {
+                int weakest_idx = 0;
+                for (int i = 1; i < MAX_APS_PER_SCAN; i++) {
+                    if (best_aps[i].rssi < best_aps[weakest_idx].rssi) weakest_idx = i;
+                }
+                if (entry->rssi > best_aps[weakest_idx].rssi) {
+                    strcpy(best_aps[weakest_idx].mac, mac_string_buf);
+                    best_aps[weakest_idx].rssi = entry->rssi;
+                }
+            }
+        }
+
+        break;
     }
 
-    if (current_ap_count < MAX_APS_PER_SCAN) {
-        strcpy(best_aps[current_ap_count].mac, mac_string_buf);
-        best_aps[current_ap_count].rssi = entry->rssi;
-        current_ap_count++;
-    } else {
-        int weakest_idx = 0;
-        for (int i = 1; i < MAX_APS_PER_SCAN; i++) {
-            if (best_aps[i].rssi < best_aps[weakest_idx].rssi) weakest_idx = i;
-        }
-        if (entry->rssi > best_aps[weakest_idx].rssi) {
-            strcpy(best_aps[weakest_idx].mac, mac_string_buf);
-            best_aps[weakest_idx].rssi = entry->rssi;
-        }
-    }
-}
+    case NET_EVENT_WIFI_SCAN_DONE:
+    {
+        const struct wifi_status *status = (const struct wifi_status *)cb->info;
 
-static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *iface)
-{
-    if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
-        handle_wifi_scan_result(cb);
-    } else if (mgmt_event == NET_EVENT_WIFI_SCAN_DONE) {
+        LOG_INF("Scan done status=%d", status->status);
+
         k_sem_give(&wifi_scan_sem);
+        break;
+    }
+
+    default:
+        break;
     }
 }
 
@@ -266,52 +310,68 @@ static int comms_send_bootstrap(void)
 /* ------------------------------------------------------------------
  * LOCALIZATION TRIGGERS
  * ------------------------------------------------------------------ */
-static int do_wifi_scan(void)
-{   
-    /*
-    struct net_if *iface = net_if_get_default();
-    if (!iface) return -ENOENT;
 
-    current_ap_count = 0;
-    struct wifi_scan_params params = { .scan_type = WIFI_SCAN_TYPE_ACTIVE, .dwell_time_active = 50 };
+/* WIFI STUFF */
 
-    if (net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params))) return -EIO;
-    k_sem_take(&wifi_scan_sem, K_SECONDS(10));
-    */
+/* Callback object used by the Zephyr network manager to report Wi-Fi events. */
+static struct net_mgmt_event_callback wifi_cb;
 
-    // Mocking the top 10 strongest APs from the provided network list
-    current_ap_count = 10;
+int do_wifi_scan(void){
+    /* Fetch the interface. Zephyr Auto-Init created this during boot. */
+    struct net_if *iface = net_if_get_wifi_sta();
+
+    if (!iface) {
+        LOG_ERR("No Wi-Fi interface found");
+        return -1;
+    }
+    LOG_INF("[OK]   Wi-Fi net_if found (index=%d).", net_if_get_by_iface(iface));
+
+    // CALLBACK REGISTERED HERE TOO ONLY FOR DEBUG
+    net_mgmt_init_event_callback(
+        &wifi_cb,
+        wifi_event_handler,
+        NET_EVENT_WIFI_SCAN_RESULT |
+        NET_EVENT_WIFI_SCAN_DONE);
     
-    // 84% Signal -> approx -58 dBm
-    strcpy(best_aps[0].mac, "00:2a:10:20:c5:91");
-    best_aps[0].rssi = -58; 
-    strcpy(best_aps[1].mac, "00:2a:10:20:c5:92");
-    best_aps[1].rssi = -58; 
-    strcpy(best_aps[2].mac, "00:2a:10:20:c5:93");
-    best_aps[2].rssi = -58; 
+    net_mgmt_add_event_callback(&wifi_cb);
 
-    // 83% Signal -> approx -59 dBm
-    strcpy(best_aps[3].mac, "00:2a:10:13:6c:b2");
-    best_aps[3].rssi = -59; 
-    strcpy(best_aps[4].mac, "00:2a:10:13:6c:b3");
-    best_aps[4].rssi = -59; 
-    strcpy(best_aps[5].mac, "00:2a:10:13:6c:b1");
-    best_aps[5].rssi = -59; 
+    struct wifi_scan_params params = {0};
 
-    // 82% Signal -> approx -59 dBm
-    strcpy(best_aps[6].mac, "00:2a:10:20:c5:9f");
-    best_aps[6].rssi = -59; 
+    /* Active scan sends probe requests instead of only listening. */
+    params.scan_type = WIFI_SCAN_TYPE_ACTIVE;
 
-    // 81% Signal -> approx -60 dBm
-    strcpy(best_aps[7].mac, "00:2a:10:20:c5:9d");
-    best_aps[7].rssi = -60; 
-    strcpy(best_aps[8].mac, "00:2a:10:20:c5:9c");
-    best_aps[8].rssi = -60; 
-    strcpy(best_aps[9].mac, "00:2a:10:20:c5:9e");
-    best_aps[9].rssi = -60; 
+    /* Scan both 2.4 GHz and 5 GHz. */
+    params.bands =
+        BIT(WIFI_FREQ_BAND_2_4_GHZ) |
+        BIT(WIFI_FREQ_BAND_5_GHZ);
 
-    // Log for debugging
-    LOG_INF("Wi-Fi scan bypassed. Loaded %d mock access points.", current_ap_count);
+    /* Stay longer on each channel. */
+    params.dwell_time_active = 120;
+    params.dwell_time_passive = 120;
+
+    /* Return as many APs as possible. */
+    params.max_bss_cnt = 64;
+
+    scan_result = 0;
+    current_ap_count = 0;
+
+    // Sends the scan request to the driver
+    int ret = net_mgmt(
+        NET_REQUEST_WIFI_SCAN,
+        iface,
+        &params,
+        sizeof(params));
+
+    if (ret) {
+        LOG_ERR("Failed to start scan (%d)", ret);
+        return ret;
+    }
+
+    LOG_INF("Scanning...");
+
+    k_sem_take(&wifi_scan_sem, K_SECONDS(20));
+
+    LOG_INF("Found %d access points", current_ap_count);
 
     return current_ap_count;
 }
@@ -335,37 +395,49 @@ static int do_gnss_fix(void)
 /* ------------------------------------------------------------------
  * BACKGROUND WORKER: LOCALIZATION WATERFALL
  * ------------------------------------------------------------------ */
-static void perform_localization_work(struct k_work *work)
+static void perform_localization_work(void)
 {
     static char payload[1024]; 
     int offset = 0;
     int batt = get_battery_level();
     int aps = 0;
 
-    //LOG_INF("Starting localization. Suspending LTE to free RF front-end...");
-    //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-
     /* STEP 1: WI-FI */
+    
+    /* Suspend LTE to prevent RF interference with Wi-Fi */
+    //LOG_INF("Suspending LTE for Wi-Fi Scan.");
+    //lte_lc_power_off();
+
+    int err = nrf_modem_at_printf("AT+CPSMS=1");
+    if (err) {
+        LOG_WRN("Failed to enable PSM: %d", err);
+    }
+    k_sleep(K_MSEC(1000));
+
+    // Turn on the wifi power
     if (gpio_is_ready_dt(&pmic_wifi_en)) {
-        gpio_pin_set_dt(&pmic_wifi_en, 1);
-        k_msleep(100); /* Wait 100ms for PMIC voltage to stabilize */
+        gpio_pin_set_dt(&pmic_wifi_en, 1); 
     }
     
-    struct net_if *iface = net_if_get_default();
-    if (iface) {
-        net_if_up(iface); 
-        aps = do_wifi_scan();
-        net_if_down(iface); 
-    }
+    k_sleep(K_MSEC(5000)); //SOme time to allow the modem to disconnect
+
+    // Calling the actual wifi scan function
+    aps = do_wifi_scan();
     
+    /* 4. Turn OFF the physical Wi-Fi power */
     if (gpio_is_ready_dt(&pmic_wifi_en)) {
         gpio_pin_set_dt(&pmic_wifi_en, 0); 
     }
+    /* 5. Disable PSM to wake the LTE modem back up to transmit the payload */
+    nrf_modem_at_printf("AT+CPSMS=0");
 
-        if (aps >= 3) {
+    k_sleep(K_MSEC(500));
+
+    /* Return to normal cellular operation */
+    //lte_lc_connect_async(lte_handler);    
+
+    if (aps >= 3) {
         LOG_INF("Wi-Fi sufficient.");
-        //LOG_INF("Wi-Fi sufficient. Reactivating LTE...");
-        //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
         
         /* Build the Wi-Fi Payload */
         offset = snprintf(payload, sizeof(payload), 
@@ -413,21 +485,20 @@ static void perform_localization_work(struct k_work *work)
 
     else {
         /* If we reach here, Wi-Fi failed, timed out, or had < 3 APs */
-        LOG_INF("Wi-Fi failed or timed out. Suspending LTE for GNSS (maybe not required)...");
-        lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+        LOG_INF("Wi-Fi failed or timed out. Attempting GNSS Localization.");
 
         /* STEP 2: GNSS */
         if (do_gnss_fix() == 0) {
-            LOG_INF("GNSS Fix acquired. Reactivating LTE...");
-            lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+            LOG_INF("GNSS Fix acquired.");
+            //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
             
             snprintf(payload, sizeof(payload), 
                 "{\"status\":\"%s\", \"battery\":%d, \"gnss\":{\"lat\":%.6f, \"lon\":%.6f, \"accuracy\":%.1f}}", 
                 current_status, batt, last_pvt.latitude, last_pvt.longitude, (double)last_pvt.accuracy);
         } 
         else {
-            LOG_INF("GNSS Timeout. Reactivating LTE for Cell ID fallback...");
-            lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+            LOG_INF("GNSS Timeout, attempting LTE...");
+            //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
             
             /* STEP 3: LTE CELL ID */
             k_sem_reset(&lte_connected);
@@ -459,15 +530,33 @@ static void perform_localization_work(struct k_work *work)
         LOG_ERR("Failed to publish! (TODO: Save to SPI Flash NVS here)");
     }
 }
-K_WORK_DEFINE(loc_work, perform_localization_work);
+
+/* ==================================================================
+ * DEDICATED THREAD: LOCALIZATION
+ * ================================================================== */
+K_SEM_DEFINE(loc_start_sem, 0, 1);
+
+static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
+{
+    while (1) {
+        /* Wait here peacefully until a button press or ping triggers us */
+        k_sem_take(&loc_start_sem, K_FOREVER);
+        
+        /* Run the waterfall without blocking Zephyr! */
+        perform_localization_work();
+    }
+}
+
+/* Create a standalone thread with a 4KB stack so it never blocks the OS */
+K_THREAD_DEFINE(loc_thread, 4096, localization_thread_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(7), 0, 0);
 
 /* ------------------------------------------------------------------
  * PUBLIC FSM COMMANDS
  * ------------------------------------------------------------------ */
 void comms_update_localization(void)
 {
-    //current_status = "ok";
-    k_work_submit(&loc_work);
+    current_status = "ok";
+    k_sem_give(&loc_start_sem); /* Wake the thread */
 }
 
 // Clears the current status from alert
@@ -478,7 +567,7 @@ void comms_clear_alert(void) {
 void comms_send_alert(enum alert_reason reason)
 {
     current_status = (reason == REASON_FALL_DETECTED) ? "fall" : "panic";
-    k_work_submit(&loc_work);
+    k_sem_give(&loc_start_sem); /* Wake the thread */
 }
 
 /* ------------------------------------------------------------------
@@ -493,28 +582,41 @@ int comms_init(void)
         gpio_pin_configure_dt(&pmic_wifi_en, GPIO_OUTPUT_INACTIVE);
     }
 
-    /* Register Wi-Fi callbacks */
-    static struct net_mgmt_event_callback wifi_cb;
-    net_mgmt_init_event_callback(&wifi_cb, wifi_mgmt_event_handler, 
-                                 NET_EVENT_WIFI_SCAN_RESULT | NET_EVENT_WIFI_SCAN_DONE);
+    /* Register callbacks for wifi scan results and scan completion.*/
+    net_mgmt_init_event_callback(
+        &wifi_cb,
+        wifi_event_handler,
+        NET_EVENT_WIFI_SCAN_RESULT |
+        NET_EVENT_WIFI_SCAN_DONE);
+    
     net_mgmt_add_event_callback(&wifi_cb);
 
+    /* Register callback for gnss */
+    nrf_modem_gnss_event_handler_set(gnss_event_handler);
+
+    /* Connecting to LTE */
+    LOG_INF("Connecting to LTE network... (This may take a few seconds)");
+    
     LOG_INF("Initializing modem library...");
     err = nrf_modem_lib_init();
-    if (err) return err;
+    if (err) {
+        LOG_ERR("Modem init failed, err %d", err);
+        return -1;
+    }
 
-    /* Initialize Modem Info exactly once at boot */
-    modem_info_init();
-
-    /* Register GNSS callback */
-    nrf_modem_gnss_event_handler_set(gnss_event_handler);
-    
-    LOG_INF("Connecting to LTE network... (This may take a few seconds)");
-    err = lte_lc_connect_async(lte_handler);                        
-    if (err) return err;
+    err = lte_lc_connect_async(lte_handler);
+    if (err) {
+        LOG_ERR("LTE connect async failed, err %d", err);
+        return -1;
+    }
 
     /* Wait for LTE to connect */
-    k_sem_take(&lte_connected, K_FOREVER);                          
+    if (k_sem_take(&lte_connected, K_MINUTES(5)) != 0) {
+        LOG_ERR("LTE connection timed out. Is the SIM card valid?");
+        return -ETIMEDOUT;
+    } else {
+        LOG_INF("LTE Connected successfully.");
+    } 
 
     struct mqtt_helper_cfg config = {
         .cb = {
@@ -553,12 +655,30 @@ int comms_init(void)
     }
 
     // Subscribing to the responses topic
-    LOG_INF("Subscribing to %s...", MQTT_SUB_TOPIC);
     err = mqtt_helper_subscribe(&sub_list);
     if (err) {
         LOG_ERR("Failed to subscribe to MQTT topic: %d", err);
         return err;
     }
-    LOG_INF("Subscribe SUCCESSFUL");
+    LOG_INF("Subscribed to %s...", MQTT_SUB_TOPIC);
+
+    LOG_INF("Comms initialization finished.");
+
     return 0;
+}
+
+void comms_safe_disconnect(void)
+{
+    LOG_WRN("=== SAFE DISCONNECT TRIGGERED ===");
+    
+    if (mqtt_is_connected) {
+        LOG_INF("Disconnecting MQTT...");
+        mqtt_helper_disconnect();
+        k_msleep(500); // Give the TCP socket a moment to close
+    }
+
+    LOG_INF("Gracefully detaching from LTE network...");
+    lte_lc_power_off(); // Sends the Detach Request to the cell tower
+    
+    LOG_INF("=== SAFE TO POWER OFF OR FLASH NEW CODE ===");
 }

@@ -210,10 +210,10 @@ int sensors_init(void)
         LOG_ERR("[SENSORS] LDO1 not ready!");
         return -ENODEV;
     }
-    ret = regulator_set_voltage(ldo1_dev, 3300000, 3300000);
+    ret = regulator_set_voltage(ldo1_dev, 1800000, 1800000);
     if (ret == 0) {
         regulator_enable(ldo1_dev);
-        LOG_INF("[SENSORS] LDO1 ON at 3.3V — buck converter active.");
+        LOG_INF("[SENSORS] LDO1 ON at 1.8V — buck converter active.");
     } else {
         LOG_ERR("[SENSORS] Failed to set LDO1 voltage: %d", ret);
         return ret;

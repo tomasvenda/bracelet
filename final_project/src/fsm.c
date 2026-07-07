@@ -164,7 +164,7 @@ static void active_tracking_exit(void *o) {
 
 static enum smf_state_result active_tracking_run(void *o) {
     if (fsm.current_event.type == EVENT_TIMER_1MIN_EXPIRED) {
-        printf("[ACTIVE TRACKING] 3 Min Timer Expired. Updating location...\n");
+        printf("[ACTIVE TRACKING] 1 Min Timer Expired. Updating location...\n");
         comms_update_localization();
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
@@ -223,13 +223,15 @@ static void alert_entry(void *o) {
     
     // Turn on the Red LED and Buzzer for immediate local feedback
     sensors_led_on(LED_RED);
-    sensors_buzzer_on();
+    //sensors_buzzer_on();
     
     // Call comms.c to initiate the panic localization and publish
-    comms_send_alert(REASON_BUTTON_PRESSED); 
+    //comms_send_alert(REASON_BUTTON_PRESSED);
+    comms_safe_disconnect(); 
 }
 
 static enum smf_state_result alert_run(void *o) {
+
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
         // Once the server acknowledges, turn off the hardware and sleep
         sensors_led_off(LED_RED);

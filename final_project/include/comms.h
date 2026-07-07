@@ -23,4 +23,9 @@ void comms_send_alert(enum alert_reason reason);
 // Clear the panic/fall status from the variable current_status
 void comms_clear_alert(void); 
 
+// Safe disconnect from lte
+void comms_safe_disconnect(void);
+
+int do_wifi_scan(void);
+
 #endif /* COMMS_H */
