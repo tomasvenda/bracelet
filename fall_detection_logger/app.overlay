@@ -1,11 +1,5 @@
 #include <zephyr/dt-bindings/regulator/npm13xx.h>
-
-/ {
-    chosen {
-        zephyr,wifi = &nordic_wlan0;
-        ncs,location-wifi = &nordic_wlan0;
-    };
-};
+#include <zephyr/dt-bindings/i2c/i2c.h>
 
 &pinctrl {
     /* --- UART0 --- */
@@ -37,53 +31,8 @@
             low-power-enable;
         };
     };
-
-    /* --- SPI3 --- */
-    spi3_default: spi3_default {
-        group1 {
-            psels = <NRF_PSEL(SPIM_SCK, 0, 13)>,
-                    <NRF_PSEL(SPIM_MOSI, 0, 14)>,
-                    <NRF_PSEL(SPIM_MISO, 0, 15)>;
-        };
-    };
-    spi3_sleep: spi3_sleep {
-        group1 {
-            psels = <NRF_PSEL(SPIM_SCK, 0, 13)>,
-                    <NRF_PSEL(SPIM_MOSI, 0, 14)>,
-                    <NRF_PSEL(SPIM_MISO, 0, 15)>;
-            low-power-enable;
-        };
-    };
-
-    /* --- PWM0 --- */
-    pwm0_default: pwm0_default {
-        group1 {
-            psels = <NRF_PSEL(PWM_OUT0, 0, 28)>,
-                    <NRF_PSEL(PWM_OUT1, 0, 29)>,
-                    <NRF_PSEL(PWM_OUT2, 0, 30)>,
-                    <NRF_PSEL(PWM_OUT3, 0, 31)>;
-        };
-    };
-    pwm0_sleep: pwm0_sleep {
-        group1 {
-            psels = <NRF_PSEL(PWM_OUT0, 0, 28)>,
-                    <NRF_PSEL(PWM_OUT1, 0, 29)>,
-                    <NRF_PSEL(PWM_OUT2, 0, 30)>,
-                    <NRF_PSEL(PWM_OUT3, 0, 31)>;
-            low-power-enable;
-        };
-    };
 };
 
-/* Lock Flash CS high so it never contends on the SPI bus */
-&gpio0 {
-    flash_coma {
-        gpio-hog;
-        gpios = <10 GPIO_ACTIVE_HIGH>;
-        output-high;
-        line-name = "Flash-CS-Coma";
-    };
-};
 
 &uart0 {
     status = "okay";
@@ -91,11 +40,6 @@
     pinctrl-0 = <&uart0_default>;
     pinctrl-1 = <&uart0_sleep>;
     pinctrl-names = "default", "sleep";
-};
-
-&uart1 {
-    status = "disabled";
-    /delete-property/ hw-flow-control;
 };
 
 &i2c2 {
@@ -129,6 +73,7 @@
         };
     };
 
+
     /* Bosch BMI270 IMU */
     bmi270: bmi270@68 {
         compatible = "bosch,bmi270";
@@ -146,44 +91,6 @@
 };
 
 
-&spi3 {
-    status = "okay";
-    pinctrl-0 = <&spi3_default>;
-    pinctrl-1 = <&spi3_sleep>;
-    pinctrl-names = "default", "sleep";
-    cs-gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
-
-    nrf70: nrf7002@0 {
-        /* THIS IS THE ONLY COMPATIBLE STRING NCS 3.3 ACCEPTS FOR SPI */
-        compatible = "nordic,nrf7002-spi";
-        status = "okay";
-        reg = <0>;
-        spi-max-frequency = <DT_FREQ_M(8)>;
-        iovdd-power-up-delay-ms = <1>;
-
-        bucken-gpios    = <&gpio0 17 GPIO_ACTIVE_HIGH>;
-        iovdd-ctrl-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
-        iovdd-regulator = <&npm1300_ldsw1>;
-        host-irq-gpios  = <&gpio0 16 GPIO_ACTIVE_HIGH>;
-
-        nordic_wlan0: wlan0 {
-            compatible = "nordic,wlan";
-            local-mac-address = [F6 CE 36 00 00 01];
-        };
-
-        /* TX power properties - REDUCED FOR BATTERY */
-        wifi-max-tx-pwr-2g-dsss = <10>;         // Was 21 → Now 10 dBm
-        wifi-max-tx-pwr-2g-mcs0 = <8>;          // Was 16 → Now 8 dBm
-        wifi-max-tx-pwr-2g-mcs7 = <8>;          // Was 16 → Now 8 dBm
-        wifi-max-tx-pwr-5g-low-mcs0 = <6>;      // Was 9 → Now 6 dBm
-        wifi-max-tx-pwr-5g-low-mcs7 = <6>;      // Was 9 → Now 6 dBm
-        wifi-max-tx-pwr-5g-mid-mcs0 = <8>;      // Was 11 → Now 8 dBm
-        wifi-max-tx-pwr-5g-mid-mcs7 = <8>;      // Was 11 → Now 8 dBm
-        wifi-max-tx-pwr-5g-high-mcs0 = <10>;    // Was 13 → Now 10 dBm
-        wifi-max-tx-pwr-5g-high-mcs7 = <10>;    // Was 13 → Now 10 dBm
-    };
-};
-
 &npm1300_regulators {
     npm1300_ldsw1: LDO1 {
         status = "okay";
@@ -197,17 +104,13 @@
     };
 
     npm1300_ldsw2: LDO2 {
-	/* Set the voltage to 1.8V */
-	regulator-min-microvolt = <1800000>;
-	regulator-max-microvolt = <1800000>;
-	regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
-	active-discharge;
-	regulator-boot-on;
-	regulator-always-on;
-	};
+        status = "okay";
+        /* Fixed: Lowered to 1.8V to match nRF9151 GPIO logic levels */
+        regulator-min-microvolt = <1800000>;
+        regulator-max-microvolt = <1800000>;
+        regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
+        active-discharge;
+        regulator-boot-on;
+        regulator-always-on;
+    };
 };
-
-&uart2 { status = "disabled"; };
-&spi0  { status = "disabled"; };
-&spi1  { status = "disabled"; };
-&spi2  { status = "disabled"; };
