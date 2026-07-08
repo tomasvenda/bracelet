@@ -78,7 +78,7 @@
     bmi270: bmi270@68 {
         compatible = "bosch,bmi270";
         reg = <0x68>;
-        irq-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+        irq-gpios = <&gpio0 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
     };
 
     /* TDK Barometer */

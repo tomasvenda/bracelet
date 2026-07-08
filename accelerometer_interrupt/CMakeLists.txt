@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(accelerometer_interrupt)
+
+target_sources(app PRIVATE
+    src/main.c
+    src/bmi2_zephyr_platform.c
+    bmi270_legacy_api/bmi2.c
+    bmi270_legacy_api/bmi270_legacy.c
+)
+
+target_include_directories(app PRIVATE bmi270_legacy_api)

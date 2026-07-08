@@ -215,7 +215,7 @@ int main(void)
     LOG_INF("DATA COLLECTION STARTING IN 10 SECONDS...");
     LOG_INF("Get into position!");
     LOG_INF("==================================================");
-    k_sleep(K_SECONDS(10));
+    k_sleep(K_SECONDS(5));
 
     /* --- 5. The 10-Second Data Collection Sequence --- */
     struct sensor_value acc[3];
