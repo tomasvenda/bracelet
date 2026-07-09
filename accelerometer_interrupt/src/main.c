@@ -3,10 +3,15 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
+#include <zephyr/logging/log.h>
 #include <stdio.h>
+#include <math.h>
 
 #include "bmi2_defs.h"
 #include "bmi270_legacy.h"
+
+/* Register this module with Zephyr's logging subsystem */
+LOG_MODULE_REGISTER(fall_detector, LOG_LEVEL_INF);
 
 BMI2_INTF_RETURN_TYPE bmi2_i2c_read(uint8_t reg_addr, uint8_t *data,
                                     uint32_t len, void *intf_ptr);
@@ -17,12 +22,31 @@ void bmi2_delay_us(uint32_t period, void *intf_ptr);
 #define BMI270_NODE DT_NODELABEL(bmi270)
 #define LDO2_NODE   DT_NODELABEL(npm1300_ldsw2)
 
+/* BMI270 hardware registers (direct access, bypasses Bosch API for FIFO) */
+#define BMI270_REG_CMD              0x7E
+#define BMI270_CMD_FIFO_FLUSH       0xB0
+#define BMI270_REG_FIFO_CONFIG_0    0x48
+#define BMI270_REG_FIFO_CONFIG_1    0x49
+#define BMI270_REG_FIFO_LENGTH_0    0x24
+#define BMI270_REG_FIFO_DATA        0x26
+
+/* 1.5s @ 50 Hz = 75 samples × 6 bytes (headerless accel) = 450 bytes each half */
+#define HALF_WINDOW_BYTES   450
+#define HALF_WINDOW_SAMPLES 75
+#define FULL_WINDOW_SAMPLES (HALF_WINDOW_SAMPLES * 2)   /* 150 samples = 3s total */
+
 const struct i2c_dt_spec bmi_i2c = I2C_DT_SPEC_GET(BMI270_NODE);
 static const struct gpio_dt_spec bmi_int = GPIO_DT_SPEC_GET(BMI270_NODE, irq_gpios);
 static struct gpio_callback bmi_int_cb;
 K_SEM_DEFINE(bmi_irq_sem, 0, 1);
 
-static volatile uint32_t isr_count = 0;   /* counted from ISR */
+static volatile uint32_t isr_count = 0;
+
+/* Raw bytes buffer, reused for each half */
+static uint8_t fifo_buffer[HALF_WINDOW_BYTES];
+
+/* Full 3s parsed feature array: past 1.5s + future 1.5s in G-forces */
+static float feature_buffer[FULL_WINDOW_SAMPLES * 3];
 
 static int power_up_imu_during_boot(void)
 {
@@ -39,249 +63,261 @@ void bmi_isr_handler(const struct device *port, struct gpio_callback *cb, gpio_p
     k_sem_give(&bmi_irq_sem);
 }
 
-static void bmi2_error_codes_print_result(int8_t rslt)
+static void print_rslt(const char *what, int8_t rslt)
 {
     if (rslt != BMI2_OK) {
-        printf("BMI2 API error code: %d\n", rslt);
+        LOG_ERR("%s: BMI2 error %d", what, rslt);
+    } else {
+        LOG_INF("%s: OK", what);
     }
 }
 
-/* Poll int_status + read INT1 pin level, so we can see BOTH sides */
-static void diagnostic_wait(const char *label, uint16_t status_mask)
+static int configure_fifo(void)
 {
-    printf("\n[DIAG] Waiting for %s. Will report every 1s.\n", label);
-    printf("[DIAG] Move/drop the board now.\n");
+    int ret;
+    uint8_t fifo_cfg;
+    uint8_t fifo0;
 
-    int elapsed = 0;
-    uint32_t last_isr_seen = isr_count;
+    /* FIFO_CONFIG_0 bit 0 = fifo_stop_on_full. 0 = stream/ring mode */
+    i2c_reg_read_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_0, &fifo0);
+    fifo0 &= ~(1 << 0);
+    i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_0, fifo0);
 
-    while (1) {
-        /* Non-blocking check on the semaphore */
-        if (k_sem_take(&bmi_irq_sem, K_MSEC(1000)) == 0) {
-            printf("[DIAG] *** ISR fired! Semaphore taken. isr_count=%u ***\n", isr_count);
-            return;
-        }
+    /* FIFO_CONFIG_1: accel-in, gyro-off, headerless */
+    ret = i2c_reg_read_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_1, &fifo_cfg);
+    if (ret) return ret;
+    fifo_cfg |= (1 << 6);   /* FIFO_ACC_EN = 1 */
+    fifo_cfg &= ~(1 << 5);  /* FIFO_GYR_EN = 0 */
+    fifo_cfg &= ~(1 << 4);  /* FIFO_HEADER_EN = 0 */
+    ret = i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_1, fifo_cfg);
+    if (ret) return ret;
 
-        elapsed++;
-
-        /* Read what the chip thinks */
-        uint16_t int_status = 0;
-        int8_t r = bmi2_get_int_status(&int_status, NULL);   /* dummy — see note */
-        (void)r;
-
-        /* Read the physical GPIO level */
-        int pin_lvl = gpio_pin_get_dt(&bmi_int);
-
-        /* Report every second */
-        printf("[DIAG] t=%ds  isr_count=%u  int1_pin_level=%d  int_status=0x%04x  match=%s\n",
-               elapsed, isr_count, pin_lvl, int_status,
-               (int_status & status_mask) ? "YES" : "no");
-
-        if (isr_count != last_isr_seen) {
-            printf("[DIAG] ISR count changed since last report (%u -> %u)\n",
-                   last_isr_seen, isr_count);
-            last_isr_seen = isr_count;
-        }
-
-        if (elapsed >= 30) {
-            printf("[DIAG] 30s timeout — moving on without event.\n");
-            return;
-        }
-    }
+    /* Flush leftover data */
+    return i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
 }
 
+/* Read the most recent 1.5s of accel from FIFO, discarding anything older,
+ * and write parsed G-force samples into out_features starting at write_offset.
+ * Returns number of samples actually written (0..75). */
+static uint16_t read_half_window(float *out_features, uint16_t write_offset,
+                                 const char *label)
+{
+    uint8_t len_buf[2];
+    int ret = i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_LENGTH_0, len_buf, 2);
+    if (ret) {
+        LOG_ERR("[%s] FIFO length read failed: %d", label, ret);
+        return 0;
+    }
+
+    uint16_t fifo_len = len_buf[0] | ((len_buf[1] & 0x1F) << 8);
+    uint16_t total_frames = fifo_len / 6;
+    uint16_t total_bytes  = total_frames * 6;
+    LOG_INF("[%s] FIFO holds %d bytes (%d frames)", label, fifo_len, total_frames);
+
+    if (total_bytes == 0) {
+        LOG_WRN("[%s] FIFO empty.", label);
+        return 0;
+    }
+
+    /* Discard old data if FIFO has more than 1.5s in it */
+    if (total_bytes > HALF_WINDOW_BYTES) {
+        uint16_t discard = total_bytes - HALF_WINDOW_BYTES;
+        uint8_t trash[64];
+        while (discard > 0) {
+            uint16_t chunk = (discard > sizeof(trash)) ? sizeof(trash) : discard;
+            ret = i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, trash, chunk);
+            if (ret) {
+                LOG_ERR("[%s] FIFO drain failed: %d", label, ret);
+                return 0;
+            }
+            discard -= chunk;
+        }
+    }
+
+    uint16_t keep_bytes = (total_bytes > HALF_WINDOW_BYTES) ? HALF_WINDOW_BYTES : total_bytes;
+    ret = i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, fifo_buffer, keep_bytes);
+    if (ret) {
+        LOG_ERR("[%s] FIFO data read failed: %d", label, ret);
+        return 0;
+    }
+
+    uint16_t sample_count = keep_bytes / 6;
+
+    for (uint16_t i = 0; i < sample_count; i++) {
+        int16_t raw_x = (int16_t)((fifo_buffer[i*6 + 1] << 8) | fifo_buffer[i*6 + 0]);
+        int16_t raw_y = (int16_t)((fifo_buffer[i*6 + 3] << 8) | fifo_buffer[i*6 + 2]);
+        int16_t raw_z = (int16_t)((fifo_buffer[i*6 + 5] << 8) | fifo_buffer[i*6 + 4]);
+        uint16_t out_idx = (write_offset + i) * 3;
+        out_features[out_idx + 0] = raw_x / 16384.0f;
+        out_features[out_idx + 1] = raw_y / 16384.0f;
+        out_features[out_idx + 2] = raw_z / 16384.0f;
+    }
+
+    return sample_count;
+}
+
+/* Placeholder for your Edge Impulse inference */
+static float run_fall_inference(const float *features, uint16_t n_samples)
+{
+    uint16_t sub_g_count = 0;
+    float min_mag = 999.0f;
+    for (uint16_t i = 0; i < n_samples; i++) {
+        float x = features[i*3 + 0];
+        float y = features[i*3 + 1];
+        float z = features[i*3 + 2];
+        float mag = sqrtf(x*x + y*y + z*z);
+        if (mag < min_mag) min_mag = mag;
+        if (mag < 0.4f) sub_g_count++;
+    }
+    float ratio = (float)sub_g_count / (float)n_samples;
+    LOG_INF("Window stats: min_mag=%.3fg  sub_0.4g_ratio=%.2f",
+            (double)min_mag, (double)ratio);
+    return ratio;
+}
 
 int main(void)
 {
     int8_t rslt;
     struct bmi2_dev dev = { 0 };
-    struct bmi2_sens_config config[2] = { 0 };
-    uint8_t high_g_sens_list[2] = { BMI2_ACCEL, BMI2_HIGH_G };
-    uint8_t low_g_sens_list[2]  = { BMI2_ACCEL, BMI2_LOW_G };
-    struct bmi2_feat_sensor_data sensor_data = { 0 };
     uint16_t int_status = 0;
-    uint8_t high_g_out = 0;
 
-    struct bmi2_sens_int_config high_g_int = { .type = BMI2_HIGH_G, .hw_int_pin = BMI2_INT1 };
-    struct bmi2_sens_int_config low_g_int  = { .type = BMI2_LOW_G,  .hw_int_pin = BMI2_INT1 };
+    LOG_INF("==========================================================");
+    LOG_INF(" BMI270 Fall Detection: past 1.5s + future 1.5s ");
+    LOG_INF("==========================================================");
 
-    printf("\n*** BMI270 High-G / Low-G Zephyr App ***\n");
-
-    printf("[STEP 1] Checking I2C + GPIO readiness...\n");
     if (!i2c_is_ready_dt(&bmi_i2c)) {
-        printf("  ERROR: I2C bus not ready\n");
-        return 0;
+        LOG_ERR("I2C bus not ready"); return 0;
     }
     if (!gpio_is_ready_dt(&bmi_int)) {
-        printf("  ERROR: INT GPIO not ready\n");
-        return 0;
+        LOG_ERR("INT GPIO not ready"); return 0;
     }
-    printf("  OK. INT pin: port=%s pin=%d\n", bmi_int.port->name, bmi_int.pin);
 
-    printf("[STEP 2] Wiring Bosch API function pointers...\n");
     dev.intf = BMI2_I2C_INTF;
     dev.read = bmi2_i2c_read;
     dev.write = bmi2_i2c_write;
     dev.delay_us = bmi2_delay_us;
     dev.intf_ptr = NULL;
     dev.read_write_len = 32;
-    printf("  OK.\n");
 
-    printf("[STEP 3] Calling bmi270_legacy_init()... (uploads ~8KB firmware, takes ~200ms)\n");
+    LOG_INF("[INIT] bmi270_legacy_init...");
     rslt = bmi270_legacy_init(&dev);
-    printf("  bmi270_legacy_init returned %d (%s)\n", rslt, rslt == BMI2_OK ? "OK" : "FAIL");
-    if (rslt != BMI2_OK) {
-        printf("  Halting.\n");
-        return 0;
-    }
-    printf("  Chip ID: 0x%02x (expected 0x24 for legacy)\n", dev.chip_id);
+    print_rslt("init", rslt);
+    if (rslt != BMI2_OK) return 0;
 
-    printf("[STEP 4] Configuring INT1 pin (push-pull, active-high, output enable)...\n");
+    /* Disable adv_power_save so subsequent feature writes commit reliably */
+    rslt = bmi2_set_adv_power_save(BMI2_DISABLE, &dev);
+    k_msleep(5);
+
+    /* INT pin electrical config */
     struct bmi2_int_pin_config int_pin_cfg = { 0 };
     int_pin_cfg.pin_type = BMI2_INT1;
-    int_pin_cfg.int_latch = BMI2_INT_LATCH;   /* was NON_LATCH */
+    int_pin_cfg.int_latch = BMI2_INT_LATCH;
     int_pin_cfg.pin_cfg[0].lvl = BMI2_INT_ACTIVE_HIGH;
     int_pin_cfg.pin_cfg[0].od  = BMI2_INT_PUSH_PULL;
     int_pin_cfg.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
     int_pin_cfg.pin_cfg[0].input_en  = BMI2_INT_INPUT_DISABLE;
-    rslt = bmi2_set_int_pin_config(&int_pin_cfg, &dev);
-    printf("  bmi2_set_int_pin_config returned %d\n", rslt);
+    bmi2_set_int_pin_config(&int_pin_cfg, &dev);
 
-    printf("[STEP 5] Configuring Zephyr GPIO callback...\n");
+    /* Setup Zephyr interrupt (Edge Triggered) */
     gpio_pin_configure_dt(&bmi_int, GPIO_INPUT);
-    gpio_pin_interrupt_configure_dt(&bmi_int, GPIO_INT_LEVEL_ACTIVE);
+    gpio_pin_interrupt_configure_dt(&bmi_int, GPIO_INT_EDGE_TO_ACTIVE);
     gpio_init_callback(&bmi_int_cb, bmi_isr_handler, BIT(bmi_int.pin));
     gpio_add_callback(bmi_int.port, &bmi_int_cb);
-    int initial_lvl = gpio_pin_get_dt(&bmi_int);
-    printf("  OK. Initial INT1 pin level = %d (expected 0 when idle)\n", initial_lvl);
 
-    printf("[STEP 6] Enabling accel + high-g feature...\n");
-    rslt = bmi270_legacy_sensor_enable(high_g_sens_list, 2, &dev);
-    printf("  sensor_enable returned %d\n", rslt);
+    /* ---- ENABLE FIRST (feature engine must own the feature before config) ---- */
+    uint8_t sens_list[2] = { BMI2_ACCEL, BMI2_LOW_G };
+    bmi270_legacy_sensor_enable(sens_list, 2, &dev);
 
-    config[0].type = BMI2_HIGH_G;
-    config[1].type = BMI2_LOW_G;
-    rslt = bmi270_legacy_get_sensor_config(config, 2, &dev);
-    printf("HIGH-G defaults: threshold=0x%04x  hyst=0x%04x  dur=0x%04x\n",
-        config[0].cfg.high_g.threshold,
-        config[0].cfg.high_g.hysteresis,
-        config[0].cfg.high_g.duration);
-    printf("LOW-G  defaults: threshold=0x%04x  hyst=0x%04x  dur=0x%04x\n",
-        config[1].cfg.low_g.threshold,
-        config[1].cfg.low_g.hysteresis,
-        config[1].cfg.low_g.duration);
+    /* ---- NOW configure accel ---- */
+    struct bmi2_sens_config accel_cfg = { .type = BMI2_ACCEL };
+    bmi270_legacy_get_sensor_config(&accel_cfg, 1, &dev);
+    accel_cfg.cfg.acc.odr         = BMI2_ACC_ODR_50HZ;
+    accel_cfg.cfg.acc.range       = BMI2_ACC_RANGE_2G;
+    accel_cfg.cfg.acc.bwp         = BMI2_ACC_NORMAL_AVG4;
+    accel_cfg.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+    bmi270_legacy_set_sensor_config(&accel_cfg, 1, &dev);
 
-    /* HIGH-G: fire on ~2g impact, sustained for 40ms */
-    config[0].cfg.high_g.threshold  = 0x1000;   /* ~2g   (0x800 = 1g) */
-    config[0].cfg.high_g.hysteresis = 0x0200;
-    config[0].cfg.high_g.duration   = 0x0002;   /* 2 samples @ 50Hz = 40ms */
-    config[0].cfg.high_g.select_x   = BMI2_ENABLE;
-    config[0].cfg.high_g.select_y   = BMI2_ENABLE;
-    config[0].cfg.high_g.select_z   = BMI2_ENABLE;
+    /* ---- NOW configure low-g feature ---- */
+    struct bmi2_sens_config low_g_cfg = { .type = BMI2_LOW_G };
+    bmi270_legacy_get_sensor_config(&low_g_cfg, 1, &dev);
+    low_g_cfg.cfg.low_g.threshold  = 0x0300;
+    low_g_cfg.cfg.low_g.hysteresis = 0x0100;
+    low_g_cfg.cfg.low_g.duration   = 0x0002;
+    bmi270_legacy_set_sensor_config(&low_g_cfg, 1, &dev);
 
-    /* LOW-G: fire when |a| < ~0.3g for at least 80ms (real free fall) */
-    config[1].cfg.low_g.threshold  = 0x0260;   /* ~0.3g */
-    config[1].cfg.low_g.hysteresis = 0x0100;
-    config[1].cfg.low_g.duration   = 0x0004;   /* 4 samples @ 50Hz = 80ms */
+    /* ---- Map to INT1 last ---- */
+    struct bmi2_sens_int_config low_g_int = {
+        .type = BMI2_LOW_G, .hw_int_pin = BMI2_INT1
+    };
+    bmi270_legacy_map_feat_int(&low_g_int, 1, &dev);
 
-    rslt = bmi270_legacy_set_sensor_config(config, 2, &dev);
-    bmi2_error_codes_print_result(rslt);
-    
+    LOG_INF("[INIT] Configuring FIFO...");
+    configure_fifo();
 
-    printf("[STEP 7] Mapping high-g feature to INT1...\n");
-    rslt = bmi270_legacy_map_feat_int(&high_g_int, 1, &dev);
-    printf("  map_feat_int returned %d\n", rslt);
+    /* Let FIFO fill so first event has full past history */
+    k_sleep(K_MSEC(1600));
 
-    sensor_data.type = BMI2_HIGH_G;
+    LOG_INF(">>> READY. Drop the device or simulate free fall. <<<");
 
-    /* ---------- Diagnostic wait for high-g ---------- */
-    printf("\n>>> READY. Shake or tap the board sharply for HIGH-G <<<\n");
-    printf(">>> Reports every 1s. Will time out after 30s. <<<\n\n");
+    uint32_t event_num = 0;
 
-    int elapsed = 0;
-    bool got_event = false;
-    while (elapsed < 30) {
-        if (k_sem_take(&bmi_irq_sem, K_MSEC(1000)) == 0) {
-            printf("[t=%ds] *** ISR FIRED — semaphore taken (isr_count=%u) ***\n",
-                   elapsed, isr_count);
-            got_event = true;
-            break;
-        }
-        elapsed++;
+    while (1) {
+        /* Wait for low-g interrupt */
+        k_sem_take(&bmi_irq_sem, K_FOREVER);
+        event_num++;
+        LOG_INF("=== EVENT #%u (isr_count=%u) ===", event_num, isr_count);
 
-        /* Poll the chip's status register directly */
-        int_status = 0;
-        bmi2_get_int_status(&int_status, &dev);
-        int pin_lvl = gpio_pin_get_dt(&bmi_int);
-
-        printf("[t=%2ds] isr_count=%u  int1_gpio=%d  int_status=0x%04x  high_g_bit=%s\n",
-               elapsed, isr_count, pin_lvl, int_status,
-               (int_status & BMI270_LEGACY_HIGH_G_STATUS_MASK) ? "SET" : "clear");
-    }
-
-    if (!got_event) {
-        printf("\n[TIMEOUT] No high-g interrupt in 30s. Skipping to low-g section anyway.\n");
-    } else {
         rslt = bmi2_get_int_status(&int_status, &dev);
-        printf("Post-ISR int_status = 0x%04x\n", int_status);
-
-        if (int_status & BMI270_LEGACY_HIGH_G_STATUS_MASK) {
-            printf("High-g interrupt confirmed by status register\n");
-            rslt = bmi270_legacy_get_feature_data(&sensor_data, 1, &dev);
-            high_g_out = sensor_data.sens_data.high_g_output;
-            printf("high_g_out = 0x%02x\n", high_g_out);
-            if (high_g_out & BMI270_LEGACY_HIGH_G_DETECT_X) printf("  X-axis\n");
-            if (high_g_out & BMI270_LEGACY_HIGH_G_DETECT_Y) printf("  Y-axis\n");
-            if (high_g_out & BMI270_LEGACY_HIGH_G_DETECT_Z) printf("  Z-axis\n");
-            printf("  %s axis\n",
-                   (high_g_out & BMI270_LEGACY_HIGH_G_DETECT_SIGN) ? "negative" : "positive");
-        } else {
-            printf("WARNING: ISR fired but HIGH_G_STATUS_MASK is not set. "
-                   "The interrupt came from something else.\n");
+        if (rslt != BMI2_OK) {
+            LOG_ERR("get_int_status failed: %d", rslt);
+            k_sem_reset(&bmi_irq_sem);
+            continue;
         }
+
+        if (!(int_status & BMI270_LEGACY_LOW_G_STATUS_MASK)) {
+            LOG_WRN("Not a low-g event, ignoring.");
+            k_sem_reset(&bmi_irq_sem);
+            continue;
+        }
+
+        /* --- STEP 1: Capture the PAST 1.5 seconds --- */
+        LOG_INF("LOW-G confirmed. Capturing PAST 1.5s from FIFO...");
+        uint16_t past_n = read_half_window(feature_buffer, 0, "PAST");
+
+        /* --- STEP 2: Flush FIFO and wait 1.5s to capture the FUTURE --- */
+        LOG_INF("Flushing FIFO to record next 1.5s (post-event)...");
+        i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
+        k_sem_reset(&bmi_irq_sem);  /* ignore any low-g re-triggers during this window */
+
+        k_sleep(K_MSEC(1550));  /* wait a hair longer than 1.5s to be sure FIFO is filled */
+
+        /* --- STEP 3: Capture the FUTURE 1.5 seconds --- */
+        LOG_INF("Capturing FUTURE 1.5s from FIFO...");
+        uint16_t future_n = read_half_window(feature_buffer, HALF_WINDOW_SAMPLES, "FUTURE");
+
+        uint16_t total_n = past_n + future_n;
+
+        if (total_n > 0) {
+            /* Run ML inference over the full 3s window */
+            float fall_prob = run_fall_inference(feature_buffer, total_n);
+            LOG_INF("Fall probability: %.2f", (double)fall_prob);
+
+            if (fall_prob > 0.5f) {
+                LOG_WRN("*** FALL DETECTED — trigger alert here ***");
+            } else {
+                LOG_INF("Not a fall, dismissing.");
+            }
+        }
+
+        /* Clear any interrupt latches, flush FIFO so next event starts clean,
+         * and let it refill before rearming. */
+        bmi2_get_int_status(&int_status, &dev);   /* clears the latched low-g */
+        i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
+        k_sem_reset(&bmi_irq_sem);
+        k_sleep(K_MSEC(1600));   /* refill FIFO for next past-window */
+
+        LOG_INF("Ready for next event.");
     }
 
-    k_sem_reset(&bmi_irq_sem);
-
-    /* ---------- LOW-G ---------- */
-    printf("\n[STEP 8] Switching to low-g...\n");
-    rslt = bmi270_legacy_sensor_disable(high_g_sens_list, 2, &dev);
-    printf("  disable high-g returned %d\n", rslt);
-    rslt = bmi270_legacy_sensor_enable(low_g_sens_list, 2, &dev);
-    printf("  enable low-g returned %d\n", rslt);
-    rslt = bmi270_legacy_map_feat_int(&low_g_int, 1, &dev);
-    printf("  map low-g to INT1 returned %d\n", rslt);
-
-    printf("\n>>> READY. Drop the board (or hold still and toss gently) for LOW-G <<<\n\n");
-
-    elapsed = 0;
-    got_event = false;
-    while (elapsed < 30) {
-        if (k_sem_take(&bmi_irq_sem, K_MSEC(1000)) == 0) {
-            printf("[t=%ds] *** ISR FIRED (isr_count=%u) ***\n", elapsed, isr_count);
-            got_event = true;
-            break;
-        }
-        elapsed++;
-        int_status = 0;
-        bmi2_get_int_status(&int_status, &dev);
-        int pin_lvl = gpio_pin_get_dt(&bmi_int);
-        printf("[t=%2ds] isr_count=%u  int1_gpio=%d  int_status=0x%04x  low_g_bit=%s\n",
-               elapsed, isr_count, pin_lvl, int_status,
-               (int_status & BMI270_LEGACY_LOW_G_STATUS_MASK) ? "SET" : "clear");
-    }
-
-    if (got_event) {
-        bmi2_get_int_status(&int_status, &dev);
-        printf("Post-ISR int_status = 0x%04x\n", int_status);
-        if (int_status & BMI270_LEGACY_LOW_G_STATUS_MASK) {
-            printf("Low-g (free fall) confirmed by status register\n");
-        }
-    } else {
-        printf("[TIMEOUT] No low-g event in 30s.\n");
-    }
-
-    printf("\nAll done. Idling.\n");
-    while (1) { k_sleep(K_SECONDS(1)); }
     return 0;
 }
