@@ -20,7 +20,7 @@
 !test/
 !test_model/
 !fall_detection_logger/
-!accelerometer_interrupt/
+!new_data_logger/
 !barometer_fifo/
 
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
@@ -48,7 +48,7 @@ test_model/edge-impulse-sdk/
 test_model/model-parameters/
 test_model/tflite-model/
 fall_detection_logger/build/
-accelerometer_interrupt/build/
+new_data_logger/build/
 barometer_fifo/build/
 
 # Ignore the contents of the build directory except the dfu_application.zip

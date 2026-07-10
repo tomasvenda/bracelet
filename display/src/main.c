@@ -1,152 +1,125 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/display.h>
-#include <zephyr/sys/printk.h>
 #include <zephyr/devicetree.h>
-#include <stdio.h>  /* Added for snprintf */
-#include <string.h>
+#include <zephyr/drivers/display.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/display/cfb.h>
+#include <zephyr/sys/printk.h>
+#include <stdio.h>
 
-#define DISPLAY_NODE DT_NODELABEL(ssd1306)
+#define OLED_NODE  DT_NODELABEL(ssd1306)
+#define OLED_ADDR  DT_REG_ADDR(OLED_NODE)
 
-static const uint8_t font_5x7[][5] = {
-    {0x7F, 0x09, 0x09, 0x09, 0x7F}, /* H (0) */
-    {0x3E, 0x41, 0x41, 0x41, 0x3E}, /* O (1) */
-    {0x7F, 0x08, 0x08, 0x08, 0x70}, /* U (2) */
-    {0x7F, 0x08, 0x08, 0x08, 0x08}, /* R (3) */
-    {0x00, 0x00, 0x00, 0x00, 0x00}, /* space (4) */
-    {0x3E, 0x51, 0x49, 0x45, 0x3E}, /* 0 (5) */
-    {0x00, 0x42, 0x7F, 0x40, 0x00}, /* 1 (6) */
-    {0x62, 0x51, 0x49, 0x49, 0x46}, /* 2 (7) */
-    {0x22, 0x49, 0x49, 0x49, 0x36}, /* 3 (8) */
-    {0x18, 0x14, 0x12, 0x7F, 0x10}, /* 4 (9) */
-    {0x2F, 0x49, 0x49, 0x49, 0x31}, /* 5 (10) */
-    {0x3E, 0x49, 0x49, 0x49, 0x30}, /* 6 (11) */
-    {0x01, 0x71, 0x09, 0x05, 0x03}, /* 7 (12) */
-    {0x36, 0x49, 0x49, 0x49, 0x36}, /* 8 (13) */
-    {0x26, 0x49, 0x49, 0x49, 0x3E}, /* 9 (14) */
-    {0x00, 0x14, 0x00, 0x00, 0x00}, /* : (15) */
-    {0x01, 0x01, 0x7F, 0x01, 0x01}, /* T (16) */
-    {0x00, 0x41, 0x7F, 0x41, 0x00}, /* I (17) */
-    {0x7F, 0x02, 0x0C, 0x02, 0x7F}, /* M (18) */
-    {0x7F, 0x49, 0x49, 0x49, 0x41}  /* E (19) */
-};
+#define PWR_PIN 26  /* P0.26, active high  */
+#define RST_PIN 23  /* P0.23, active low   */
 
-static inline void set_pixel(uint8_t *fb, int x, int y, int width, int pitch_bytes, bool vtiled)
+static const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+
+static bool i2c_probe(const struct device *bus, uint8_t addr)
 {
-    if (x < 0 || y < 0 || x >= width) {
-        return;
-    }
+	struct i2c_msg msg;
+	uint8_t dummy;
 
-    if (vtiled) {
-        int byte_index = (y / 8) * width + x;
-        fb[byte_index] |= 1 << (y % 8);
-    } else {
-        int byte_index = y * pitch_bytes + x / 8;
-        fb[byte_index] |= 1 << (7 - (x % 8));
-    }
+	msg.buf   = &dummy;
+	msg.len   = 0U;
+	msg.flags = I2C_MSG_WRITE | I2C_MSG_STOP;
+
+	return i2c_transfer(bus, &msg, 1, addr) == 0;
 }
 
-static void draw_char(uint8_t *fb, int x0, int y0, char ch, int width, int pitch_bytes, bool vtiled)
+static void i2c_bus_scan(const struct device *bus)
 {
-    const uint8_t *glyph;
+	int found = 0;
 
-    /* Map the incoming character to our font array index */
-    if (ch == 'H') glyph = font_5x7[0];
-    else if (ch == 'O') glyph = font_5x7[1];
-    else if (ch == 'U') glyph = font_5x7[2];
-    else if (ch == 'R') glyph = font_5x7[3];
-    else if (ch == ' ') glyph = font_5x7[4];
-    else if (ch >= '0' && ch <= '9') glyph = font_5x7[5 + (ch - '0')];
-    else if (ch == ':') glyph = font_5x7[15];
-    else if (ch == 'T') glyph = font_5x7[16];
-    else if (ch == 'I') glyph = font_5x7[17];
-    else if (ch == 'M') glyph = font_5x7[18];
-    else if (ch == 'E') glyph = font_5x7[19];
-    else glyph = font_5x7[4]; /* Default to space */
-
-    for (int col = 0; col < 5; col++) {
-        uint8_t data = glyph[col];
-        for (int row = 0; row < 7; row++) {
-            if (data & (1 << row)) {
-                set_pixel(fb, x0 + col, y0 + row, width, pitch_bytes, vtiled);
-            }
-        }
-    }
+	printk("[SCAN] scanning %s...\n", bus->name);
+	for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+		if (i2c_probe(bus, addr)) {
+			printk("[SCAN]   ACK at 0x%02X\n", addr);
+			found++;
+		}
+	}
+	printk("[SCAN] done, %d device(s)\n", found);
 }
 
-static void draw_text(uint8_t *fb, int x, int y, const char *text, int width, int pitch_bytes, bool vtiled)
+int main(void)
 {
-    while (*text) {
-        draw_char(fb, x, y, *text, width, pitch_bytes, vtiled);
-        x += 6;
-        text++;
-    }
-}
+	const struct device *display = DEVICE_DT_GET(OLED_NODE);
+	const struct device *bus     = DEVICE_DT_GET(DT_BUS(OLED_NODE));
+	struct display_capabilities caps;
+	char line[32];
+	int rc, t = 0;
 
-void main(void)
-{
-    const struct device *display = DEVICE_DT_GET(DISPLAY_NODE);
-    struct display_capabilities caps;
-    int ret;
+	printk("\n=== SSD1315 manual bring-up ===\n");
 
-    if (!device_is_ready(display)) {
-        printk("Display device not ready\n");
-        return;
-    }
+	if (!device_is_ready(gpio0) || !device_is_ready(bus)) {
+		printk("[0] !! gpio0 or i2c bus not ready, stopping\n");
+		return 0;
+	}
 
-    display_get_capabilities(display, &caps);
-    printk("Display resolution: %ux%u\n", caps.x_resolution, caps.y_resolution);
+	/* --- Step 1: reset line low BEFORE power (avoid latch-up) --- */
+	rc = gpio_pin_configure(gpio0, RST_PIN, GPIO_OUTPUT_LOW);
+	printk("[1] P0.23 (RST) configured LOW (in reset): rc=%d\n", rc);
 
-    ret = display_blanking_off(display);
-    if (ret < 0) {
-        printk("display_blanking_off failed: %d\n", ret);
-        return;
-    }
+	/* --- Step 2: power on --- */
+	rc = gpio_pin_configure(gpio0, PWR_PIN, GPIO_OUTPUT_HIGH);
+	printk("[2] P0.26 (PWR) configured HIGH: rc=%d\n", rc);
+	printk("[2] >> measure P0.26 and display VDD with multimeter NOW <<\n");
+	k_msleep(100);
 
-    const size_t buf_size = (caps.x_resolution * caps.y_resolution) / 8;
-    static uint8_t fb[1024];
-    bool vtiled = caps.screen_info & SCREEN_INFO_MONO_VTILED;
-    int pitch_bytes = caps.x_resolution / 8;
+	/* --- Step 3: release reset --- */
+	rc = gpio_pin_set_raw(gpio0, RST_PIN, 1);
+	printk("[3] P0.23 (RST) released HIGH: rc=%d\n", rc);
+	k_msleep(120);
 
-    if (buf_size > sizeof(fb)) {
-        printk("Framebuffer buffer too small (%u > %u)\n", (unsigned)buf_size, (unsigned)sizeof(fb));
-        return;
-    }
+	/* --- Step 4: probe OLED specifically, then full scan --- */
+	printk("[4] probe 0x3C: %s\n", i2c_probe(bus, 0x3C) ? "ACK" : "no ACK");
+	printk("[4] probe 0x3D: %s\n", i2c_probe(bus, 0x3D) ? "ACK" : "no ACK");
+	i2c_bus_scan(bus);
 
-    struct display_buffer_descriptor desc = {
-        .buf_size = buf_size,
-        .width = caps.x_resolution,
-        .height = caps.y_resolution,
-        .pitch = caps.x_resolution,
-        .frame_incomplete = false,
-    };
+	/* --- Step 5: init display driver (deferred in DT) --- */
+	rc = device_init(display);
+	printk("[5] device_init(%s): %d %s\n", display->name, rc,
+	       rc == 0 ? "(OK)" : "(FAIL)");
+	if (rc != 0 || !device_is_ready(display)) {
+		printk("[5] !! stopping. If no ACK in step 4 -> hardware:\n");
+		printk("       - VDD present at panel?\n");
+		printk("       - BS1/BS2 strapping = I2C mode? (BS1=1, BS2=0)\n");
+		printk("       - D1+D2 tied together for I2C SDA?\n");
+		return 0;
+	}
 
-    /* Continuous Watch Loop */
-    while (1) {
-        /* 1. Clear the framebuffer for the new frame */
-        memset(fb, 0x00, buf_size);
+	display_get_capabilities(display, &caps);
+	printk("[6] caps: %ux%u, formats 0x%02x, current 0x%02x\n",
+	       caps.x_resolution, caps.y_resolution,
+	       caps.supported_pixel_formats, caps.current_pixel_format);
 
-        /* 2. Calculate current time based on system uptime */
-        uint32_t uptime_s = k_uptime_get() / 1000;
-        uint32_t hours = (uptime_s / 3600) % 24;
-        uint32_t minutes = (uptime_s / 60) % 60;
-        uint32_t seconds = uptime_s % 60;
+	rc = cfb_framebuffer_init(display);
+	printk("[7] cfb_framebuffer_init: %d\n", rc);
+	if (rc != 0) {
+		return 0;
+	}
 
-        /* 3. Format the string to HH:MM:SS */
-        char time_str[9];
-        snprintf(time_str, sizeof(time_str), "%02u:%02u:%02u", hours, minutes, seconds);
+	rc = cfb_framebuffer_clear(display, true);
+	printk("[8] cfb_framebuffer_clear: %d\n", rc);
+	rc = display_blanking_off(display);
+	printk("[8] display_blanking_off: %d %s\n", rc,
+	       rc == 0 ? "(panel ON)" : "(FAIL)");
 
-        /* 4. Draw the UI to the buffer */
-        draw_text(fb, 0, 0, "TIME", caps.x_resolution, pitch_bytes, vtiled);
-        draw_text(fb, 0, 16, time_str, caps.x_resolution, pitch_bytes, vtiled);
-
-        /* 5. Send the buffer to the OLED driver */
-        ret = display_write(display, 0, 0, &desc, fb);
-        if (ret < 0) {
-            printk("display_write failed: %d\n", ret);
-        }
-
-        /* 6. Wait exactly 1 second before ticking again */
-        k_sleep(K_SECONDS(1));
-    }
+	printk("[9] draw loop\n");
+	while (1) {
+		cfb_framebuffer_clear(display, false);
+		cfb_print(display, "SSD1315 OK", 0, 0);
+		snprintf(line, sizeof(line), "uptime %d s", t);
+		cfb_print(display, line, 0, 16);
+		rc = cfb_framebuffer_finalize(display);
+		if (rc) {
+			printk("[9] finalize failed: %d\n", rc);
+		} else if (t % 10 == 0) {
+			printk("[9] alive, t=%d\n", t);
+		}
+		t++;
+		k_sleep(K_SECONDS(1));
+	}
+	return 0;
 }
