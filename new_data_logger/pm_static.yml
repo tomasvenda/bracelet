@@ -1,0 +1,8 @@
+nonsecure_storage:
+  address: 0xC0000
+  size: 0x40000
+  span: [nvs_storage]
+
+nvs_storage:
+  address: 0xC0000
+  size: 0x40000
