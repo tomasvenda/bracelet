@@ -1,6 +1,7 @@
 #include <zephyr/dt-bindings/regulator/npm13xx.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 
+
 &pinctrl {
     /* --- UART0 --- */
     uart0_default: uart0_default {
@@ -16,6 +17,7 @@
             low-power-enable;
         };
     };
+
 
     /* --- I2C2 --- */
     i2c2_default: i2c2_default {
@@ -34,6 +36,7 @@
 };
 
 
+
 &uart0 {
     status = "okay";
     current-speed = <115200>;
@@ -41,6 +44,7 @@
     pinctrl-1 = <&uart0_sleep>;
     pinctrl-names = "default", "sleep";
 };
+
 
 &i2c2 {
     status = "okay";
@@ -51,20 +55,23 @@
     zephyr,concat-buf-size = <2048>;
     zephyr,flash-buf-max-size = <2048>;
 
+
     npm1300: pmic@6b {
         compatible = "nordic,npm1300";
         reg = <0x6b>;
         status = "okay";
+
 
         npm1300_regulators: regulators {
             compatible = "nordic,npm1300-regulator";
             status = "okay";
         };
 
+
         npm1300_charger: charger {
             compatible = "nordic,npm1300-charger";
             status = "okay";
-            vbus-limit-microamp = <500000>;
+            vbus-limit-microamp = <1300000>;
             term-microvolt = <4200000>;
             current-microamp = <400000>;
             dischg-limit-microamp = <1000000>;
@@ -74,12 +81,14 @@
     };
 
 
+
     /* Bosch BMI270 IMU */
     bmi270: bmi270@68 {
         compatible = "bosch,bmi270";
         reg = <0x68>;
         irq-gpios = <&gpio0 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
     };
+
 
     /* TDK Barometer */
     icp20100: icp20100@63 {
@@ -88,7 +97,9 @@
         int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
     };
 
+
 };
+
 
 
 &npm1300_regulators {
@@ -103,6 +114,7 @@
         regulator-always-on;
     };
 
+
     npm1300_ldsw2: LDO2 {
         status = "okay";
         /* Fixed: Lowered to 1.8V to match nRF9151 GPIO logic levels */
@@ -112,5 +124,50 @@
         active-discharge;
         regulator-boot-on;
         regulator-always-on;
+    };
+};
+
+
+/* =====================================================================
+ * NEW: USER BUTTON (P0.06) + RGB LED (P0.28 R / P0.29 G / P0.30 B)
+ * ===================================================================== */
+/ {
+    leds {
+        compatible = "gpio-leds";
+
+        /* NOTE: assumed active-high (GPIO sources current into the LED).
+         * If your RGB LED is common-anode (GPIO sinks current),
+         * change GPIO_ACTIVE_HIGH to GPIO_ACTIVE_LOW on all three. */
+        led_red: led_0 {
+            gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
+            label = "Red LED";
+        };
+        led_green: led_1 {
+            gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+            label = "Green LED";
+        };
+        led_blue: led_2 {
+            gpios = <&gpio0 30 GPIO_ACTIVE_HIGH>;
+            label = "Blue LED";
+        };
+    };
+
+    buttons {
+        compatible = "gpio-keys";
+
+        /* NOTE: assumed button shorts P0.06 to GND when pressed,
+         * using the internal pull-up. If your button pulls the pin
+         * to VDD instead, use (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH). */
+        button0: button_0 {
+            gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "User button (LTE disconnect)";
+        };
+    };
+
+    aliases {
+        led-red = &led_red;
+        led-green = &led_green;
+        led-blue = &led_blue;
+        sw0 = &button0;
     };
 };
