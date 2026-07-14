@@ -50,6 +50,7 @@ test_model/tflite-model/
 fall_detection_logger/build/
 new_data_logger/build/
 barometer_fifo/build/
+final_project/edge_impulse/
 
 # Ignore the contents of the build directory except the dfu_application.zip
 server_com/build/*

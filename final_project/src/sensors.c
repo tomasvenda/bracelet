@@ -1,395 +1,598 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/zbus/zbus.h>
-#include <stdio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/regulator.h>
+#include <zephyr/zbus/zbus.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "bmi2_defs.h"
+#include "bmi270_legacy.h"
 
 #include "events.h"
 #include "sensors.h"
 
 LOG_MODULE_REGISTER(sensors_system, LOG_LEVEL_INF);
 
-/* Devicetree Bindings */
+/* ======================================================================
+ * DEVICETREE BINDINGS
+ * ====================================================================== */
 #define BMI270_NODE    DT_NODELABEL(bmi270)
 #define ICP201XX_NODE  DT_NODELABEL(icp20100)
-#define BUTTON_NODE    DT_ALIAS(sw0) 
+#define BUTTON_NODE    DT_ALIAS(sw0)
+#define PWM_CTLR_NODE  DT_NODELABEL(pwm0)
+#define LDO1_NODE      DT_NODELABEL(npm1300_ldo1)
+#define LDO2_NODE      DT_NODELABEL(npm1300_ldo2)
 
-#define PWM_CTLR_NODE       DT_NODELABEL(pwm0)
-#define LDO1_NODE           DT_NODELABEL(npm1300_ldo1)
-#define LDO2_NODE           DT_NODELABEL(npm1300_ldo2)
-
+const struct i2c_dt_spec bmi_i2c = I2C_DT_SPEC_GET(BMI270_NODE);
+static const struct i2c_dt_spec icp_i2c = I2C_DT_SPEC_GET(ICP201XX_NODE);
+static const struct gpio_dt_spec bmi_int = GPIO_DT_SPEC_GET(BMI270_NODE, irq_gpios);
+static const struct gpio_dt_spec button  = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static const struct device *const pwm_dev = DEVICE_DT_GET(PWM_CTLR_NODE);
 
-// Channel assignments for LED & Buzzer (PWM0: ch0=red, ch1=green, ch2=blue, ch3=buzzer)
+/* ======================================================================
+ * BMI270 / ICP-20100 REGISTERS & WINDOW GEOMETRY (from the logger)
+ * ====================================================================== */
+#define BMI270_REG_CMD              0x7E
+#define BMI270_CMD_FIFO_FLUSH       0xB0
+#define BMI270_REG_FIFO_CONFIG_0    0x48
+#define BMI270_REG_FIFO_CONFIG_1    0x49
+#define BMI270_REG_FIFO_LENGTH_0    0x24
+#define BMI270_REG_FIFO_DATA        0x26
+
+#define ICP20100_REG_MODE_SELECT 0xC0
+#define ICP20100_REG_FIFO_FILL   0xC4
+#define ICP20100_REG_FIFO_BASE   0xFA
+#define ICP20100_REG_DUMMY       0x00
+#define ICP20100_FIFO_LEVEL_MASK 0x1F
+#define ICP20100_CMD_FIFO_FLUSH  0x80
+
+#define HALF_WINDOW_BYTES   450
+#define HALF_WINDOW_SAMPLES 75
+#define FULL_WINDOW_SAMPLES (HALF_WINDOW_SAMPLES * 2)
+#define MODEL_AXES          4
+
+/* ======================================================================
+ * MODULE STATE
+ * ====================================================================== */
+static struct bmi2_dev bmi_dev_ctx;
+static struct gpio_callback bmi_int_cb;
+static struct gpio_callback button_cb_data;
+static K_SEM_DEFINE(bmi_irq_sem, 0, 1);
+
+/* Set while a fall-window capture is running: suppresses the idle
+* pressure flush and any further harsh-impact events. */
+static atomic_t sensors_ready = ATOMIC_INIT(0);
+static atomic_t capture_pending = ATOMIC_INIT(0);
+
+static uint8_t bmi_fifo_buffer[HALF_WINDOW_BYTES];
+static uint8_t icp_fifo_buffer[16 * 6];
+
+struct sensor_record {
+    double x, y, z;
+    double p_hpa;
+    bool press_valid;
+};
+static struct sensor_record event_payload[FULL_WINDOW_SAMPLES];
+
+/* Bosch API glue -- implemented in bmi270_legacy_api (same as before) */
+BMI2_INTF_RETURN_TYPE bmi2_i2c_read(uint8_t reg_addr, uint8_t *data, uint32_t len, void *intf_ptr);
+BMI2_INTF_RETURN_TYPE bmi2_i2c_write(uint8_t reg_addr, const uint8_t *data, uint32_t len, void *intf_ptr);
+void bmi2_delay_us(uint32_t period, void *intf_ptr);
+
+/* ======================================================================
+ * PWM: LED & BUZZER (unchanged from previous version)
+ * ====================================================================== */
 #define PWM_CH_RED     0U
 #define PWM_CH_GREEN   1U
 #define PWM_CH_BLUE    2U
 #define PWM_CH_BUZZER  3U
-
-// Unified period: MUST be the same for all channels on nRF PWM hardware.
-// 4000 Hz = buzzer resonant frequency. LEDs at 50% DC look solid at this freq.
 #define PWM_UNIFIED_PERIOD  PWM_HZ(4000)
 #define PWM_LED_PULSE       (PWM_UNIFIED_PERIOD / 2U)
 #define PWM_BUZZ_PULSE      (PWM_UNIFIED_PERIOD / 2U)
 
-static const struct device *bmi_dev = DEVICE_DT_GET(BMI270_NODE);
-static const struct device *baro_dev = DEVICE_DT_GET(ICP201XX_NODE);
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
-
-/* Trigger structures for the IMU */
-static struct sensor_trigger imu_motion_trig;
-static struct sensor_trigger imu_shock_trig;
-static struct gpio_callback button_cb_data;
-
-/* ======================================================================
- * INTERRUPT SERVICE ROUTINES (ISRs)
- * ====================================================================== */
-
-static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
-    // Add a static variable to remember the last time the button was pressed
-    static uint32_t last_press_time = 0;
-    uint32_t current_time = k_uptime_get_32();
-
-    // Debounce threshold: 500 milliseconds
-    if (current_time - last_press_time < 500) {
-        // Ignore this interrupt, it's just mechanical bounce
-        return; 
-    }
-    
-    // Update the tracker
-    last_press_time = current_time;
-
-    // Keep ISRs fast: Just pack the event and fire it onto ZBUS
-    struct bracelet_event event = {
-        .type = EVENT_BUTTON_PRESSED
-    };
-    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
-}
-
-static void imu_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
-{
-    struct bracelet_event event;
-
-    LOG_INF("BMI270 interrupt received!");
-
-    if (trig->type == SENSOR_TRIG_MOTION) {
-        event.type = EVENT_IMU_LIGHT_MOTION;
-    } 
-    else if (trig->type == SENSOR_TRIG_DELTA) {
-        event.type = EVENT_IMU_HARSH_IMPACT;
-    }
-
-    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
-}
-
-// Runs at POST_KERNEL priority 85, before the BMI270 driver at priority 90.
-// Powers LDO2 (1.8V) so the BMI270 ASIC has supply before its driver inits.
-
-static int power_up_imu_during_boot(void)
-{
-    const struct device *const ldo2_dev = DEVICE_DT_GET(LDO2_NODE);
-
-    printk("\n--- BOOT PRIORITY 85: Powering up PMIC LDO2 for BMI270 ---\n");
-
-    if (!device_is_ready(ldo2_dev)) {
-        printk("WARNING: LDO2 device not ready flag set, attempting anyway...\n");
-    }
-
-    int ret = regulator_enable(ldo2_dev);
-    if (ret == 0) {
-        printk("SUCCESS: LDO2 enabled (1.8V rail up).\n");
-    } else {
-        printk("ERROR: regulator_enable(LDO2) failed: %d\n", ret);
-    }
-
-    printk("Sleeping 100ms for BMI270 ASIC to boot...\n");
-    k_sleep(K_MSEC(100));
-    printk("--- BOOT PRIORITY 85 COMPLETE ---\n\n");
-
-    return 0;
-}
-
-SYS_INIT(power_up_imu_during_boot, POST_KERNEL, 85);
-
-/* ======================================================================
- * PUBLIC FUNCTIONS
- * ====================================================================== */
-
-static int bmi270_configure_and_arm(void)
-{
-    int ret;
-
-    /* 1. Check if the device pointer itself is somehow null */
-    if (bmi_dev == NULL) {
-        LOG_ERR("bmi_dev pointer is completely NULL!");
-        return -EINVAL;
-    }
-
-    /* 2. Check if the driver API structure is null */
-    if (bmi_dev->api == NULL) {
-        LOG_ERR("bmi_dev->api is NULL! The driver did not link correctly.");
-        return -EINVAL;
-    }
-
-    /* 3. Check if the specific attr_set function pointer is null */
-    const struct sensor_driver_api *api = (const struct sensor_driver_api *)bmi_dev->api;
-    if (api->attr_set == NULL) {
-        LOG_ERR("attr_set API is NULL! Is CONFIG_SENSOR=y actually applying to the driver?");
-        return -EINVAL;
-    }
-    
-    if (api->trigger_set == NULL) {
-        LOG_ERR("trigger_set API is NULL! Trigger code is not compiled into the driver.");
-        return -EINVAL;
-    }
-
-    struct sensor_value full_scale    = { .val1 = 2,   .val2 = 0 };
-    struct sensor_value sampling_freq = { .val1 = 100, .val2 = 0 };
-    struct sensor_value oversampling  = { .val1 = 1,   .val2 = 0 };
-
-    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_FULL_SCALE, &full_scale);
-    if (ret) { LOG_ERR("[SENSORS] BMI270 full-scale failed: %d", ret); return ret; }
-
-    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_OVERSAMPLING, &oversampling);
-    if (ret) { LOG_ERR("[SENSORS] BMI270 oversampling failed: %d", ret); return ret; }
-
-    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &sampling_freq);
-    if (ret) { LOG_ERR("[SENSORS] BMI270 ODR failed: %d", ret); return ret; }
-
-    /* Set Any-Motion Threshold 1.5 m/s^2 (approx 0.15G) */
-    struct sensor_value slope_th = { .val1 = 0, .val2 = 500000 };
-    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &slope_th);
-    if (ret) { LOG_ERR("[SENSORS] BMI270 slope threshold failed: %d", ret); return ret; }
-
-    /* Set Any-Motion Duration (e.g., 60 ms) */
-    struct sensor_value slope_dur = { .val1 = 60, .val2 = 0 };
-    ret = sensor_attr_set(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &slope_dur);
-    if (ret) { LOG_ERR("[SENSORS] BMI270 slope duration failed: %d", ret); return ret; }
-
-    imu_motion_trig.type = SENSOR_TRIG_MOTION;
-    imu_motion_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-
-    ret = sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
-
-    if (ret) {
-        LOG_ERR("Motion trigger failed: %d", ret);
-        return ret;
-    }
-    /*
-    imu_shock_trig.type = SENSOR_TRIG_DELTA;
-    imu_shock_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-
-    LOG_INF("TRIGGER TEST 4");
-    ret = sensor_trigger_set(bmi_dev, &imu_shock_trig, imu_trigger_handler);
-    LOG_INF("TRIGGER TEST 5");
-
-    if (ret) {
-        LOG_WRN("Shock trigger failed: %d", ret);
-    }
-    */
-    LOG_INF("[SENSORS] BMI270 armed with default any-motion threshold.");
-    return 0;
-}
-
-
-int sensors_init(void)
-{
-    int ret;
-
-    LOG_INF("[SENSORS] Initializing hardware...");
-
-    // ── LDO1 → Buck Converter (from main-4.c) ───────────────────────
-    // LDO1 at 3.3V drives the buck converter EN pin HIGH.
-    // Without this, the PWM LED/buzzer circuit has no power.
-    const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
-    if (!device_is_ready(ldo1_dev)) {
-        LOG_ERR("[SENSORS] LDO1 not ready!");
-        return -ENODEV;
-    }
-    ret = regulator_set_voltage(ldo1_dev, 1800000, 1800000);
-    if (ret == 0) {
-        regulator_enable(ldo1_dev);
-        LOG_INF("[SENSORS] LDO1 ON at 1.8V — buck converter active.");
-    } else {
-        LOG_ERR("[SENSORS] Failed to set LDO1 voltage: %d", ret);
-        return ret;
-    }
-
-    // ── PWM device check (from main-4.c) ────────────────────────────
-    if (!device_is_ready(pwm_dev)) {
-        LOG_ERR("[SENSORS] PWM device not ready!");
-        return -ENODEV;
-    }
-    LOG_INF("[SENSORS] PWM controller ready.");
-
-    // ── Emergency Button (same logic as before, error code from main-4.c) ──
-    if (!gpio_is_ready_dt(&button)) {
-        LOG_ERR("[SENSORS] Button GPIO not ready!");
-        return -ENODEV;
-    }
-    ret = gpio_pin_configure_dt(&button, GPIO_INPUT | GPIO_PULL_UP);
-    if (ret < 0) {
-        LOG_ERR("[SENSORS] Failed to configure button: %d", ret);
-        return ret;
-    }
-    ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (ret < 0) {
-        LOG_ERR("[SENSORS] Failed to configure button interrupt: %d", ret);
-        return ret;
-    }
-    gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(button.pin));
-    gpio_add_callback(button.port, &button_cb_data);
-    LOG_INF("[SENSORS] Emergency button armed.");
-
-    // ── Barometer (from main-3.c) ────────────────────────────────────
-    if (!device_is_ready(baro_dev)) {
-        LOG_ERR("[SENSORS] Barometer (ICP20100) not ready!");
-        return -ENODEV;
-    }
-    LOG_INF("[SENSORS] Barometer ready.");
-
-    // ── BMI270 IMU (from main-2.c) ───────────────────────────────────
-    if (!device_is_ready(bmi_dev)) {
-        LOG_ERR("[SENSORS] BMI270 not ready, skipping trigger setup");
-    } else {
-        int imu_ret = bmi270_configure_and_arm();
-        if (imu_ret) {
-            LOG_ERR("[SENSORS] BMI270 setup failed: %d", imu_ret);
-            return imu_ret;
-        }
-    }
-
-    LOG_INF("[SENSORS] BMI270 ready.");
-    LOG_INF("[SENSORS] All hardware initialised successfully.");
-
-    return 0;
-}
-
-int sensors_collect_ml_window(float *ml_data_buffer, int max_features)
-{
-    struct sensor_value acc[3], gyr[3], press, temp;
-    int index = 0;
-
-    /* Example: 50Hz sampling (20ms period) for 2 seconds = 100 loops */
-    int num_samples = 100; 
-    
-    printf("[SENSORS] Collecting %d seconds of ML Data...\n", (num_samples * 20) / 1000);
-
-    for (int i = 0; i < num_samples; i++) {
-        /* Ensure we don't overflow the buffer */
-        if (index + 8 > max_features) {
-            break;
-        }
-
-        /* Fetch data from physical chips */
-        sensor_sample_fetch(bmi_dev);
-        sensor_sample_fetch(baro_dev);
-
-        /* Read IMU */
-        sensor_channel_get(bmi_dev, SENSOR_CHAN_ACCEL_XYZ, acc);
-        sensor_channel_get(bmi_dev, SENSOR_CHAN_GYRO_XYZ, gyr);
-        
-        /* Read Baro */
-        sensor_channel_get(baro_dev, SENSOR_CHAN_PRESS, &press);
-        sensor_channel_get(baro_dev, SENSOR_CHAN_AMBIENT_TEMP, &temp);
-
-        /* Flatten all data into the 1D ML Buffer */
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&acc[0]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&acc[1]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&acc[2]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&gyr[0]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&gyr[1]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&gyr[2]);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&press);
-        ml_data_buffer[index++] = (float)sensor_value_to_double(&temp);
-
-        /* Sleep to maintain exactly 50Hz sampling rate */
-        k_sleep(K_MSEC(20));
-    }
-
-    printf("[SENSORS] ML Data collection complete.\n");
-    return index; /* Return the number of features populated */
-}
-
-// ── LED & BUZZER CONTROL FUNCTIONS ───────────────────────────────────
-// All 4 PWM channels on nRF share ONE period register.
-// Period is fixed at PWM_UNIFIED_PERIOD (4000 Hz) for buzzer compatibility.
-// LEDs at 50% duty cycle at 4000 Hz appear as solid light (no flicker).
-
-// Color parameter: pass a bitmask of the defines below.
-// Examples:  sensors_led_on(LED_RED)
-//            sensors_led_on(LED_RED | LED_BLUE)   -> magenta
-//            sensors_led_on(LED_RED | LED_GREEN | LED_BLUE) -> white
-
-#define LED_RED   BIT(0)
-#define LED_GREEN BIT(1)
-#define LED_BLUE  BIT(2)
-
 void sensors_led_on(uint8_t color)
 {
-    const uint32_t period = PWM_UNIFIED_PERIOD;
-    const uint32_t pulse  = PWM_LED_PULSE;
-
-    if (color & LED_RED) {
-        pwm_set(pwm_dev, PWM_CH_RED,   period, pulse, PWM_POLARITY_NORMAL);
-    }
-    if (color & LED_GREEN) {
-        pwm_set(pwm_dev, PWM_CH_GREEN, period, pulse, PWM_POLARITY_NORMAL);
-    }
-    if (color & LED_BLUE) {
-        pwm_set(pwm_dev, PWM_CH_BLUE,  period, pulse, PWM_POLARITY_NORMAL);
-    }
+    if (color & LED_RED)   pwm_set(pwm_dev, PWM_CH_RED,   PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
+    if (color & LED_GREEN) pwm_set(pwm_dev, PWM_CH_GREEN, PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
+    if (color & LED_BLUE)  pwm_set(pwm_dev, PWM_CH_BLUE,  PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
 }
 
 void sensors_led_off(uint8_t color)
 {
-    const uint32_t period = PWM_UNIFIED_PERIOD;
-
-    if (color & LED_RED) {
-        pwm_set(pwm_dev, PWM_CH_RED,   period, 0U, PWM_POLARITY_NORMAL);
-    }
-    if (color & LED_GREEN) {
-        pwm_set(pwm_dev, PWM_CH_GREEN, period, 0U, PWM_POLARITY_NORMAL);
-    }
-    if (color & LED_BLUE) {
-        pwm_set(pwm_dev, PWM_CH_BLUE,  period, 0U, PWM_POLARITY_NORMAL);
-    }
+    if (color & LED_RED)   pwm_set(pwm_dev, PWM_CH_RED,   PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
+    if (color & LED_GREEN) pwm_set(pwm_dev, PWM_CH_GREEN, PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
+    if (color & LED_BLUE)  pwm_set(pwm_dev, PWM_CH_BLUE,  PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
 }
 
 void sensors_buzzer_on(void)
 {
-    pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD,
-            PWM_BUZZ_PULSE, PWM_POLARITY_NORMAL);
+    pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD, PWM_BUZZ_PULSE, PWM_POLARITY_NORMAL);
 }
 
 void sensors_buzzer_off(void)
 {
-    pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD,
-            0U, PWM_POLARITY_NORMAL);
+    pwm_set(pwm_dev, PWM_CH_BUZZER, PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
 }
 
-// Disables the motion interrupts
-void sensors_disable_motion_trigger(void) {
-    if (bmi_dev == NULL) return;
-    
-    // Safely unset the handler to stop Zephyr from firing the callback
-    sensor_trigger_set(bmi_dev, &imu_motion_trig, NULL);
-    LOG_INF("IMU light motion trigger disabled.");
+void sensors_evaluation_done(void)
+{
+    atomic_clear(&capture_pending);
 }
 
-// Enables the motion interrupt
-void sensors_enable_motion_trigger(void) {
-    if (bmi_dev == NULL) return;
-    
-    // Re-arm the handler using the same trigger struct from initialization
-    int ret = sensor_trigger_set(bmi_dev, &imu_motion_trig, imu_trigger_handler);
-    if (ret) {
-        LOG_ERR("Failed to re-enable motion trigger: %d", ret);
+
+
+/* ======================================================================
+ * ISRs -- fast paths only (no I2C allowed here)
+ * ====================================================================== */
+static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    static uint32_t last_press_time = 0;
+    uint32_t now = k_uptime_get_32();
+    if (now - last_press_time < 500) return;
+    last_press_time = now;
+
+    struct bracelet_event event = { .type = EVENT_BUTTON_PRESSED };
+    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+}
+
+static void bmi_isr(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins)
+{
+    /* Which feature fired is in an I2C register -- defer to the
+     * sensor thread. */
+    k_sem_give(&bmi_irq_sem);
+}
+
+/* ======================================================================
+ * PRESSURE HELPERS (from the logger)
+ * ====================================================================== */
+static void flush_pressure_fifo(void)
+{
+    uint8_t fill = 0;
+    i2c_reg_read_byte_dt(&icp_i2c, ICP20100_REG_FIFO_FILL, &fill);
+    fill |= ICP20100_CMD_FIFO_FLUSH;
+    i2c_reg_write_byte_dt(&icp_i2c, ICP20100_REG_FIFO_FILL, fill);
+}
+
+static uint16_t read_pressure_fifo(float *out_pressure, uint16_t max_samples)
+{
+    uint8_t fill_reg = 0;
+    if (i2c_reg_read_byte_dt(&icp_i2c, ICP20100_REG_FIFO_FILL, &fill_reg)) return 0;
+
+    uint8_t count = fill_reg & ICP20100_FIFO_LEVEL_MASK;
+    if (count == 0) return 0;
+    if (count > max_samples) count = max_samples;
+
+    if (i2c_burst_read_dt(&icp_i2c, ICP20100_REG_FIFO_BASE, icp_fifo_buffer, count * 6)) return 0;
+
+    uint8_t dummy;
+    i2c_reg_read_byte_dt(&icp_i2c, ICP20100_REG_DUMMY, &dummy);
+
+    for (int i = 0; i < count; i++) {
+        uint8_t *pkt = &icp_fifo_buffer[i * 6];
+        int32_t raw = ((int32_t)(pkt[2] & 0x0f) << 16) | ((int32_t)pkt[1] << 8) | pkt[0];
+        if (raw & 0x080000) raw |= 0xFFF00000;
+        out_pressure[i] = ((float)raw * 40.0f / 131072.0f) + 70.0f;
+    }
+    return count;
+}
+
+/* ======================================================================
+ * BMI270 FIFO HELPERS (from the logger)
+ * ====================================================================== */
+static int configure_bmi_fifo(void)
+{
+    int ret;
+    uint8_t fifo_cfg, fifo0;
+    i2c_reg_read_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_0, &fifo0);
+    fifo0 &= ~(1 << 0);
+    i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_0, fifo0);
+
+    ret = i2c_reg_read_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_1, &fifo_cfg);
+    if (ret) return ret;
+    fifo_cfg |= (1 << 6);   /* ACC_EN */
+    fifo_cfg &= ~(1 << 5);  /* GYR off */
+    fifo_cfg &= ~(1 << 4);  /* headerless */
+    ret = i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_FIFO_CONFIG_1, fifo_cfg);
+    if (ret) return ret;
+
+    return i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
+}
+
+static uint16_t read_bmi_half_window(struct sensor_record *out_buf,
+                                     uint16_t write_offset, const char *label)
+{
+    uint8_t len_buf[2];
+    if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_LENGTH_0, len_buf, 2)) {
+        LOG_ERR("[%s] FIFO length read failed", label);
+        return 0;
+    }
+
+    uint16_t fifo_len = len_buf[0] | ((len_buf[1] & 0x1F) << 8);
+    uint16_t total_bytes = (fifo_len / 6) * 6;
+    if (total_bytes == 0) {
+        LOG_WRN("[%s] FIFO empty.", label);
+        return 0;
+    }
+
+    if (total_bytes > HALF_WINDOW_BYTES) {
+        uint16_t discard = total_bytes - HALF_WINDOW_BYTES;
+        uint8_t trash[64];
+        while (discard > 0) {
+            uint16_t chunk = (discard > sizeof(trash)) ? sizeof(trash) : discard;
+            if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, trash, chunk)) return 0;
+            discard -= chunk;
+        }
+    }
+
+    uint16_t keep = (total_bytes > HALF_WINDOW_BYTES) ? HALF_WINDOW_BYTES : total_bytes;
+    if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, bmi_fifo_buffer, keep)) return 0;
+
+    uint16_t n = keep / 6;
+    if ((write_offset + n) > FULL_WINDOW_SAMPLES) {
+        n = FULL_WINDOW_SAMPLES - write_offset;
+    }
+
+    for (uint16_t i = 0; i < n; i++) {
+        int16_t rx = (int16_t)((bmi_fifo_buffer[i*6+1] << 8) | bmi_fifo_buffer[i*6+0]);
+        int16_t ry = (int16_t)((bmi_fifo_buffer[i*6+3] << 8) | bmi_fifo_buffer[i*6+2]);
+        int16_t rz = (int16_t)((bmi_fifo_buffer[i*6+5] << 8) | bmi_fifo_buffer[i*6+4]);
+        out_buf[write_offset+i].x = rx / 16384.0;
+        out_buf[write_offset+i].y = ry / 16384.0;
+        out_buf[write_offset+i].z = rz / 16384.0;
+    }
+
+    LOG_INF("[%s] Wrote %d samples (indices %d..%d)", label, n,
+            write_offset, write_offset + n - 1);
+    return n;
+}
+
+/* ======================================================================
+ * PRESSURE ALIGNMENT (from the logger; baseline subtraction ENABLED --
+ * the model was trained on delta-from-first-sample)
+ * ====================================================================== */
+static void align_and_pad_pressure(float *past_p, uint16_t past_n,
+                                   float *future_p, uint16_t future_n)
+{
+    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) event_payload[i].press_valid = false;
+
+    int idx = HALF_WINDOW_SAMPLES - 1 - ((past_n - 1) * 2);
+    if (idx < 0) idx = 0;
+    for (int i = 0; i < past_n; i++) {
+        if (idx >= HALF_WINDOW_SAMPLES) break;
+        event_payload[idx].p_hpa = past_p[i] * 10.0f;
+        event_payload[idx].press_valid = true;
+        idx += 2;
+    }
+
+    idx = FULL_WINDOW_SAMPLES - 1 - ((future_n - 1) * 2);
+    if (idx < HALF_WINDOW_SAMPLES) idx = HALF_WINDOW_SAMPLES;
+    for (int i = 0; i < future_n; i++) {
+        if (idx >= FULL_WINDOW_SAMPLES) break;
+        event_payload[idx].p_hpa = future_p[i] * 10.0f;
+        event_payload[idx].press_valid = true;
+        idx += 2;
+    }
+
+    double last_p = past_n > 0 ? ((double)past_p[0] * 10.0) : 1013.25;
+    bool has_p = false;
+    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
+        if (event_payload[i].press_valid) {
+            last_p = event_payload[i].p_hpa; has_p = true;
+        } else if (has_p) {
+            event_payload[i].p_hpa = last_p;
+            event_payload[i].press_valid = true;
+        }
+    }
+    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
+        if (event_payload[i].press_valid) { last_p = event_payload[i].p_hpa; break; }
+    }
+    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
+        if (!event_payload[i].press_valid) {
+            event_payload[i].p_hpa = last_p;
+            event_payload[i].press_valid = true;
+        } else break;
+    }
+
+    double baseline = event_payload[0].p_hpa;
+    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
+        event_payload[i].p_hpa -= baseline;
+    }
+}
+
+/* ======================================================================
+ * LATCHED-INT-SAFE REARM (from the logger)
+ * ====================================================================== */
+static void rearm_bmi_interrupt(void)
+{
+    uint16_t int_status = 0;
+
+    for (int i = 0; i < 5; i++) {
+        bmi2_get_int_status(&int_status, &bmi_dev_ctx);
+        if (gpio_pin_get_dt(&bmi_int) == 0) break;
+        k_sleep(K_MSEC(10));
+    }
+    k_sem_reset(&bmi_irq_sem);
+    gpio_pin_interrupt_configure_dt(&bmi_int, GPIO_INT_EDGE_TO_ACTIVE);
+    if (gpio_pin_get_dt(&bmi_int) > 0) {
+        LOG_WRN("INT still latched at rearm -- forcing handler run.");
+        k_sem_give(&bmi_irq_sem);
+    }
+}
+
+/* ======================================================================
+ * PUBLIC: FALL-WINDOW CAPTURE (called from the FSM's evaluation k_work)
+ * ====================================================================== */
+int sensors_capture_fall_window(float *features, size_t count)
+{
+    float past_p[16], future_p[16];
+
+    if (count != FULL_WINDOW_SAMPLES * MODEL_AXES) {
+        LOG_ERR("Capture buffer is %u floats, need %u",
+                (unsigned)count, FULL_WINDOW_SAMPLES * MODEL_AXES);
+        return -EINVAL;
+    }
+
+    /* Mask INT1 while we're busy for several seconds */
+    gpio_pin_interrupt_configure_dt(&bmi_int, GPIO_INT_DISABLE);
+
+    memset(event_payload, 0, sizeof(event_payload));
+    LOG_INF("=== FALL WINDOW CAPTURE (t=%lld) ===", k_uptime_get());
+
+    uint16_t past_acc_n   = read_bmi_half_window(event_payload, 0, "PAST");
+    uint16_t past_press_n = read_pressure_fifo(past_p, 16);
+
+    i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
+    flush_pressure_fifo();
+
+    k_sleep(K_MSEC(1650));
+
+    uint16_t future_acc_n = read_bmi_half_window(event_payload, HALF_WINDOW_SAMPLES, "FUTURE");
+    bmi2_set_adv_power_save(BMI2_DISABLE, &bmi_dev_ctx);
+    uint16_t future_press_n = read_pressure_fifo(future_p, 16);
+
+    LOG_INF("Captured: past_acc=%d/75 future_acc=%d/75 past_p=%d future_p=%d",
+            past_acc_n, future_acc_n, past_press_n, future_press_n);
+
+    int ret = 0;
+    if ((past_acc_n + future_acc_n) == FULL_WINDOW_SAMPLES) {
+        align_and_pad_pressure(past_p, past_press_n, future_p, future_press_n);
+        for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
+            features[i * MODEL_AXES + 0] = (float)event_payload[i].x;
+            features[i * MODEL_AXES + 1] = (float)event_payload[i].y;
+            features[i * MODEL_AXES + 2] = (float)event_payload[i].z;
+            features[i * MODEL_AXES + 3] = (float)event_payload[i].p_hpa;
+        }
+    } else {
+        LOG_WRN("FIFO read short -- discarding event.");
+        ret = -EIO;
+    }
+
+    /* Clean state, refill, rearm */
+    i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
+    flush_pressure_fifo();
+    LOG_INF("Refilling FIFOs (1.6s)...");
+    k_sleep(K_MSEC(1600));
+    rearm_bmi_interrupt();
+
+    return ret;
+}
+
+/* ======================================================================
+ * LIGHT-MOTION (ANY-MOTION) TRIGGER CONTROL -- FSM API preserved.
+ * Only the any-motion FEATURE is toggled; LOW-G stays armed always.
+ * ====================================================================== */
+void sensors_enable_motion_trigger(void)
+{
+    uint8_t sens = BMI2_ANY_MOTION;
+    int8_t rslt = bmi270_legacy_sensor_enable(&sens, 1, &bmi_dev_ctx);
+    if (rslt != BMI2_OK) {
+        LOG_ERR("Failed to enable any-motion: %d", rslt);
     } else {
         LOG_INF("IMU light motion trigger enabled.");
     }
+}
+
+void sensors_disable_motion_trigger(void)
+{
+    uint8_t sens = BMI2_ANY_MOTION;
+    int8_t rslt = bmi270_legacy_sensor_disable(&sens, 1, &bmi_dev_ctx);
+    if (rslt != BMI2_OK) {
+        LOG_ERR("Failed to disable any-motion: %d", rslt);
+    } else {
+        LOG_INF("IMU light motion trigger disabled.");
+    }
+}
+
+/* ======================================================================
+ * SENSOR THREAD: turns INT1 pulses into zbus events, keeps the
+ * pressure FIFO fresh while idle.
+ * ====================================================================== */
+static void sensor_thread_fn(void *a, void *b, void *c)
+{
+    uint16_t int_status;
+    struct bracelet_event event;
+
+    while (1) {
+        if (k_sem_take(&bmi_irq_sem, K_MSEC(600)) != 0) {
+            if (atomic_get(&sensors_ready) && !atomic_get(&capture_pending)) {
+                flush_pressure_fifo();
+            }
+            continue;
+        }
+
+        if (atomic_get(&capture_pending)) {
+            continue;   /* capture in progress; ignore strays */
+        }
+
+        int_status = 0;
+        if (bmi2_get_int_status(&int_status, &bmi_dev_ctx) != BMI2_OK) {
+            continue;
+        }
+
+        if (int_status & BMI270_LEGACY_LOW_G_STATUS_MASK) {
+            /* Harsh impact: hand off to the FSM exactly once until the
+             * evaluation capture completes. */
+            if (atomic_cas(&capture_pending, 0, 1)) {
+                LOG_INF("LOW-G interrupt -> EVENT_IMU_HARSH_IMPACT");
+                event.type = EVENT_IMU_HARSH_IMPACT;
+                zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+            }
+        } else if (int_status & BMI270_LEGACY_ANY_MOT_STATUS_MASK) {
+            LOG_INF("ANY-MOTION interrupt -> EVENT_IMU_LIGHT_MOTION");
+            event.type = EVENT_IMU_LIGHT_MOTION;
+            zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+        }
+
+        /* Latched pin hygiene: make sure it actually dropped */
+        if (gpio_pin_get_dt(&bmi_int) > 0) {
+            bmi2_get_int_status(&int_status, &bmi_dev_ctx);
+        }
+    }
+}
+K_THREAD_DEFINE(sensor_tid, 2048, sensor_thread_fn, NULL, NULL, NULL,
+                K_PRIO_PREEMPT(6), 0, 0);
+
+/* ======================================================================
+ * INITIALIZATION
+ * ====================================================================== */
+int sensors_init(void)
+{
+    int ret;
+    int8_t rslt;
+
+    LOG_INF("[SENSORS] Initializing hardware...");
+
+    // /* -- LDO1 -> buck converter enable (unchanged) -- */
+    // const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
+    // if (!device_is_ready(ldo1_dev)) {
+    //     LOG_ERR("[SENSORS] LDO1 not ready!");
+    //     return -ENODEV;
+    // }
+    // ret = regulator_set_voltage(ldo1_dev, 1800000, 1800000);
+    // if (ret == 0) {
+    //     regulator_enable(ldo1_dev);
+    //     LOG_INF("[SENSORS] LDO1 ON -- buck converter active.");
+    // } else {
+    //     LOG_ERR("[SENSORS] Failed to set LDO1 voltage: %d", ret);
+    //     return ret;
+    // }
+
+    /* -- PWM -- */
+    if (!device_is_ready(pwm_dev)) {
+        LOG_ERR("[SENSORS] PWM device not ready!");
+        return -ENODEV;
+    }
+
+    /* -- Emergency button (unchanged) -- */
+    if (!gpio_is_ready_dt(&button)) {
+        LOG_ERR("[SENSORS] Button GPIO not ready!");
+        return -ENODEV;
+    }
+    gpio_pin_configure_dt(&button, GPIO_INPUT | GPIO_PULL_UP);
+    gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(button.pin));
+    gpio_add_callback(button.port, &button_cb_data);
+    LOG_INF("[SENSORS] Emergency button armed.");
+
+    /* -- I2C bus -- */
+    if (!i2c_is_ready_dt(&bmi_i2c) || !i2c_is_ready_dt(&icp_i2c)) {
+        LOG_ERR("[SENSORS] I2C bus not ready");
+        return -ENODEV;
+    }
+
+    /* -- ICP-20100: 25 Hz continuous + warm-up discard -- */
+    LOG_INF("[SENSORS] Configuring ICP-20100 (25Hz, 1.2s warm-up)...");
+    i2c_reg_write_byte_dt(&icp_i2c, ICP20100_REG_MODE_SELECT, 0x08);
+    k_sleep(K_MSEC(1200));
+    flush_pressure_fifo();
+
+    /* -- BMI270 via legacy API -- */
+    bmi_dev_ctx.intf = BMI2_I2C_INTF;
+    bmi_dev_ctx.read = bmi2_i2c_read;
+    bmi_dev_ctx.write = bmi2_i2c_write;
+    bmi_dev_ctx.delay_us = bmi2_delay_us;
+    bmi_dev_ctx.intf_ptr = NULL;
+    bmi_dev_ctx.read_write_len = 32;
+
+    rslt = bmi270_legacy_init(&bmi_dev_ctx);
+    if (rslt != BMI2_OK) {
+        LOG_ERR("[SENSORS] bmi270_legacy_init failed: %d", rslt);
+        return -EIO;
+    }
+    bmi2_set_adv_power_save(BMI2_DISABLE, &bmi_dev_ctx);
+    k_msleep(5);
+
+    /* INT1 pin: latched, active-high, push-pull */
+    struct bmi2_int_pin_config pin_cfg = { 0 };
+    pin_cfg.pin_type = BMI2_INT1;
+    pin_cfg.int_latch = BMI2_INT_LATCH;
+    pin_cfg.pin_cfg[0].lvl = BMI2_INT_ACTIVE_HIGH;
+    pin_cfg.pin_cfg[0].od  = BMI2_INT_PUSH_PULL;
+    pin_cfg.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
+    pin_cfg.pin_cfg[0].input_en  = BMI2_INT_INPUT_DISABLE;
+    bmi2_set_int_pin_config(&pin_cfg, &bmi_dev_ctx);
+
+    gpio_pin_configure_dt(&bmi_int, GPIO_INPUT);
+    gpio_init_callback(&bmi_int_cb, bmi_isr, BIT(bmi_int.pin));
+    gpio_add_callback(bmi_int.port, &bmi_int_cb);
+
+    /* Enable accel + LOW-G (always on) + ANY-MOTION (FSM-controlled) */
+    uint8_t sens_list[3] = { BMI2_ACCEL, BMI2_LOW_G, BMI2_ANY_MOTION };
+    rslt = bmi270_legacy_sensor_enable(sens_list, 3, &bmi_dev_ctx);
+    if (rslt != BMI2_OK) {
+        LOG_ERR("[SENSORS] sensor_enable failed: %d", rslt);
+        return -EIO;
+    }
+
+    /* Accel: 50 Hz / 2g -- MUST match the training data */
+    struct bmi2_sens_config accel_cfg = { .type = BMI2_ACCEL };
+    bmi270_legacy_get_sensor_config(&accel_cfg, 1, &bmi_dev_ctx);
+    accel_cfg.cfg.acc.odr         = BMI2_ACC_ODR_50HZ;
+    accel_cfg.cfg.acc.range       = BMI2_ACC_RANGE_2G;
+    accel_cfg.cfg.acc.bwp         = BMI2_ACC_NORMAL_AVG4;
+    accel_cfg.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+    bmi270_legacy_set_sensor_config(&accel_cfg, 1, &bmi_dev_ctx);
+
+    /* LOW-G: the harsh-impact / fall-candidate trigger (logger values) */
+    struct bmi2_sens_config low_g_cfg = { .type = BMI2_LOW_G };
+    bmi270_legacy_get_sensor_config(&low_g_cfg, 1, &bmi_dev_ctx);
+    low_g_cfg.cfg.low_g.threshold  = 0x0300;
+    low_g_cfg.cfg.low_g.hysteresis = 0x0100;
+    low_g_cfg.cfg.low_g.duration   = 0x0002;
+    bmi270_legacy_set_sensor_config(&low_g_cfg, 1, &bmi_dev_ctx);
+
+    /* ANY-MOTION: the light-motion / localization-wake trigger.
+     * threshold ~0.15 g, duration ~60 ms (matches old Zephyr-driver
+     * values; tune to taste). */
+    struct bmi2_sens_config any_mot_cfg = { .type = BMI2_ANY_MOTION };
+    bmi270_legacy_get_sensor_config(&any_mot_cfg, 1, &bmi_dev_ctx);
+    any_mot_cfg.cfg.any_motion.threshold = 0x136;  /* ~0.15 g (1LSB=0.49mg) */
+    any_mot_cfg.cfg.any_motion.duration  = 3;      /* 3 x 20ms = 60 ms      */
+    any_mot_cfg.cfg.any_motion.select_x  = 1;
+    any_mot_cfg.cfg.any_motion.select_y  = 1;
+    any_mot_cfg.cfg.any_motion.select_z  = 1;
+    bmi270_legacy_set_sensor_config(&any_mot_cfg, 1, &bmi_dev_ctx);
+
+    /* Map BOTH features to INT1 */
+    struct bmi2_sens_int_config feat_ints[2] = {
+        { .type = BMI2_LOW_G,   .hw_int_pin = BMI2_INT1 },
+        { .type = BMI2_ANY_MOTION, .hw_int_pin = BMI2_INT1 },
+    };
+    bmi270_legacy_map_feat_int(feat_ints, 2, &bmi_dev_ctx);
+
+    configure_bmi_fifo();
+
+    /* Let the FIFO fill before accepting interrupts, then arm safely */
+    LOG_INF("[SENSORS] Filling FIFO (1.6s) before arming...");
+    k_sleep(K_MSEC(1600));
+    rearm_bmi_interrupt();
+
+    atomic_set(&sensors_ready, 1);
+    LOG_INF("[SENSORS] All hardware initialised (low-g + any-motion armed).");
+    return 0;
 }

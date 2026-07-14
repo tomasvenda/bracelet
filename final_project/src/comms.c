@@ -26,9 +26,6 @@ LOG_MODULE_REGISTER(comms_system, LOG_LEVEL_INF);
 /* ------------------------------------------------------------------
  * HARDWARE BINDINGS & STATE
  * ------------------------------------------------------------------ */
-/* Define the PMIC GPIO enable pin from the overlay alias */
-#define PMIC_WIFI_EN_NODE DT_ALIAS(pmic_gpio1)
-static const struct gpio_dt_spec pmic_wifi_en = GPIO_DT_SPEC_GET(PMIC_WIFI_EN_NODE, gpios);
 
 static K_SEM_DEFINE(wifi_scan_sem, 0, 1);
 static K_SEM_DEFINE(gnss_fix_sem, 0, 1);
@@ -36,6 +33,9 @@ static K_SEM_DEFINE(lte_connected, 0, 1);
 static K_SEM_DEFINE(mqtt_connected_sem, 0, 1);
 
 K_EVENT_DEFINE(app_events); // event flag used purely for the Wi-Fi localisation handshake
+
+#define WIFI_EVT_SUCCESS BIT(0)
+#define WIFI_EVT_FAIL    BIT(1)
 
 #define MQTT_TOPIC "bracelet/prototype_pcb/data"
 #define CLIENT_ID "prototype_pcb"
@@ -177,18 +177,40 @@ static void gnss_event_handler(int event)
 /* ------------------------------------------------------------------
  * EVENT HANDLERS (LTE & MQTT)
  * ------------------------------------------------------------------ */
+
+ /* Registration-denied backoff, WITHOUT sleeping inside the LTE event
+ * handler (that blocked all subsequent LTE events for 2 minutes). */
+static void lte_backoff_fn(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(lte_backoff_work, lte_backoff_fn);
+static bool in_backoff;
+
+static void lte_backoff_fn(struct k_work *work)
+{
+
+    if (!in_backoff) {
+        LOG_WRN("Registration denied: modem offline, 2 min backoff.");
+        lte_lc_offline();
+        in_backoff = true;
+        k_work_schedule(&lte_backoff_work, K_MINUTES(2));
+    } else {
+        LOG_INF("Backoff over: modem back to normal mode.");
+        lte_lc_normal();
+        in_backoff = false;
+    }
+}
+
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
     if (evt->type == LTE_LC_EVT_NW_REG_STATUS) {
         if ((evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME) ||
             (evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+            in_backoff = false;
+            k_work_cancel_delayable(&lte_backoff_work);
             LOG_INF("LTE Network registered");
             k_sem_give(&lte_connected);
         } else if (evt->nw_reg_status == LTE_LC_NW_REG_REGISTRATION_DENIED) {
-            LOG_ERR("Cell twers rejected connection! Turning off modem to prevent FPLMN lock.");
-            lte_lc_offline();
-            k_sleep(K_MINUTES(2));
-            lte_lc_normal();
+            LOG_ERR("Cell tower rejected connection! Scheduling backoff.");
+            k_work_schedule(&lte_backoff_work, K_NO_WAIT);
         }
     }
 }
@@ -219,13 +241,12 @@ static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf
 
     LOG_INF("MQTT RX: %s  |  topic: %.*s", buf, topic.size, topic.ptr);
     
-    /* 1. Localization Responses (via k_event) */
     if (strcmp(buf, "wifi_successful") == 0) {
-        k_event_post(&app_events, EVENT_SERVER_WIFI_SUCCESS);
+        k_event_post(&app_events, WIFI_EVT_SUCCESS);
         return;
-    } 
+    }
     else if (strcmp(buf, "wifi_failed") == 0) {
-        k_event_post(&app_events, EVENT_SERVER_WIFI_FAIL);
+        k_event_post(&app_events, WIFI_EVT_FAIL);
         return;
     }
 
@@ -251,14 +272,20 @@ static int mqtt_ensure_connected(void)
 
     LOG_INF("MQTT is disconnected. Reconnecting...");
     
-    /* Ensure LTE is attached first */
+    /* 1. WAKE THE MODEM UP! (Brings it out of lte_lc_power_off state) */
+    lte_lc_normal();
+    
+    /* 2. Wait for LTE registration */
     enum lte_lc_nw_reg_status reg_status;
     lte_lc_nw_reg_status_get(&reg_status);
     
     if (reg_status != LTE_LC_NW_REG_REGISTERED_HOME && reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING) {
         LOG_INF("Waiting for LTE...");
         k_sem_reset(&lte_connected);
-        if (k_sem_take(&lte_connected, K_SECONDS(120)) != 0) return -ENETUNREACH;
+        if (k_sem_take(&lte_connected, K_SECONDS(120)) != 0) {
+            LOG_ERR("LTE Reconnect failed!");
+            return -ENETUNREACH;
+        }
     }
 
     struct mqtt_helper_conn_params conn_params = {
@@ -271,6 +298,14 @@ static int mqtt_ensure_connected(void)
     if (mqtt_helper_connect(&conn_params) != 0) return -EIO;
 
     if (k_sem_take(&mqtt_connected_sem, K_SECONDS(15)) != 0) return -ETIMEDOUT;
+
+    /* CLEAN_SESSION=y: broker forgot our subscriptions -- restore them */
+    int err = mqtt_helper_subscribe(&sub_list);
+    if (err) {
+        LOG_ERR("Re-subscribe failed: %d", err);
+        return err;
+    }
+    LOG_INF("Re-subscribed to %s", MQTT_SUB_TOPIC);
     return 0;
 }
 
@@ -404,132 +439,124 @@ static void perform_localization_work(void)
 
     /* STEP 1: WI-FI */
     
-    /* Suspend LTE to prevent RF interference with Wi-Fi */
-    //LOG_INF("Suspending LTE for Wi-Fi Scan.");
-    //lte_lc_power_off();
-
-    int err = nrf_modem_at_printf("AT+CPSMS=1");
-    if (err) {
-        LOG_WRN("Failed to enable PSM: %d", err);
+    /* Cleanly drop MQTT BEFORE killing its transport, so
+     * mqtt_ensure_connected() does a real reconnect afterwards. */
+    if (mqtt_is_connected) {
+        mqtt_helper_disconnect();
+        k_msleep(300);
+        mqtt_is_connected = false;
     }
-    k_sleep(K_MSEC(1000));
-
-    // Turn on the wifi power
-    if (gpio_is_ready_dt(&pmic_wifi_en)) {
-        gpio_pin_set_dt(&pmic_wifi_en, 1); 
-    }
+    LOG_INF("Taking LTE offline for Wi-Fi Scan.");
+    lte_lc_offline();
+    k_sleep(K_MSEC(500));
     
-    k_sleep(K_MSEC(5000)); //SOme time to allow the modem to disconnect
+    k_sleep(K_MSEC(1000)); // Allow PMIC rail to stabilize
+
+    /* --- WAKE THE NRF7002 --- */
+    struct net_if *iface = net_if_get_wifi_sta();
+    if (iface) {
+        net_if_up(iface);
+        k_sleep(K_MSEC(100)); /* Let the driver boot the chip */
+    }
 
     // Calling the actual wifi scan function
     aps = do_wifi_scan();
-    
-    /* 4. Turn OFF the physical Wi-Fi power */
-    if (gpio_is_ready_dt(&pmic_wifi_en)) {
-        gpio_pin_set_dt(&pmic_wifi_en, 0); 
+
+    if (iface) {
+        net_if_down(iface); /* Drops bucken-gpios LOW automatically */
     }
-    /* 5. Disable PSM to wake the LTE modem back up to transmit the payload */
-    nrf_modem_at_printf("AT+CPSMS=0");
-
     k_sleep(K_MSEC(500));
-
+    
+    lte_lc_normal();
+    // sketchy
     /* Return to normal cellular operation */
     //lte_lc_connect_async(lte_handler);    
 
-    if (aps >= 3) {
-        LOG_INF("Wi-Fi sufficient.");
-        
-        /* Build the Wi-Fi Payload */
-        offset = snprintf(payload, sizeof(payload), 
+    if (aps > 0) {
+        /* Build the Wi-Fi Payload (any AP count -- server judges) */
+        offset = snprintf(payload, sizeof(payload),
             "{\"status\":\"%s\", \"battery\":%d, \"wifi\":{\"accessPoints\":[", current_status, batt);
         for (int i = 0; i < aps; i++) {
-            offset += snprintf(payload + offset, sizeof(payload) - offset, 
-                "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s", 
+            offset += snprintf(payload + offset, sizeof(payload) - offset,
+                "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s",
                 best_aps[i].mac, best_aps[i].rssi, (i < aps - 1) ? "," : "");
         }
         snprintf(payload + offset, sizeof(payload) - offset, "]}}");
-        
-        /* 1. Publish immediately */
+
         LOG_INF("Publishing Wi-Fi Payload: %s", payload);
         lte_mqtt_publish_str(payload);
 
-        /* 2. Set up event waiting logic */
-        bool wifi_successful = false;
-        
-        /* Clear any stale flags from previous runs */
-        k_event_clear(&app_events, EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL);
-        
-        /* Block the thread for up to 10 seconds */
-        uint32_t events = k_event_wait(
-            &app_events,
-            EVENT_SERVER_WIFI_SUCCESS | EVENT_SERVER_WIFI_FAIL,
-            false,
-            K_SECONDS(10)
-        );
+        k_event_clear(&app_events, WIFI_EVT_SUCCESS | WIFI_EVT_FAIL);
+        uint32_t events = k_event_wait(&app_events,
+                                       WIFI_EVT_SUCCESS | WIFI_EVT_FAIL,
+                                       false, K_SECONDS(10));
 
-        /* 3. Evaluate the result */
-        if (events & EVENT_SERVER_WIFI_SUCCESS) {
-            wifi_successful = true;
-            LOG_INF("Server confirmed Wi-Fi localization -> Ending pipeline.");
-        } else if (events & EVENT_SERVER_WIFI_FAIL) {
+        if (events & WIFI_EVT_SUCCESS) {
+            LOG_INF("Server confirmed Wi-Fi localization -> done.");
+            return;
+        } else if (events & WIFI_EVT_FAIL) {
             LOG_INF("Server rejected Wi-Fi data.");
         } else {
             LOG_INF("Server response timeout (10s).");
         }
-
-        /* 4. If successful, end the function completely */
-        if (wifi_successful) {
-            return; 
-        }
+    } else {
+        LOG_WRN("Wi-Fi scan found no access points.");
     }
 
+#if defined(CONFIG_LOC_WIFI_ONLY)
+    /* Fallbacks intentionally disabled during bring-up. The STATUS
+     * must still reach the server even without a location -- critical
+     * for fall/panic alerts. (The Wi-Fi payload above already carried
+     * the status if aps > 0, but publish a bare one if it didn't.) */
+    LOG_WRN("Wi-Fi localization inconclusive; GNSS/LTE fallback disabled (LOC_WIFI_ONLY).");
+    if (aps == 0) {
+        snprintf(payload, sizeof(payload),
+            "{\"status\":\"%s\", \"battery\":%d}", current_status, batt);
+        LOG_INF("Publishing bare status payload: %s", payload);
+        lte_mqtt_publish_str(payload);
+    }
+    return;
+#else
+    /* ===== FALLBACK WATERFALL (enabled when LOC_WIFI_ONLY=n) ===== */
+    LOG_INF("Wi-Fi failed or inconclusive. Attempting GNSS Localization.");
+
+    if (do_gnss_fix() == 0) {
+        LOG_INF("GNSS Fix acquired.");
+        snprintf(payload, sizeof(payload),
+            "{\"status\":\"%s\", \"battery\":%d, \"gnss\":{\"lat\":%.6f, \"lon\":%.6f, \"accuracy\":%.1f}}",
+            current_status, batt, last_pvt.latitude, last_pvt.longitude, (double)last_pvt.accuracy);
+    }
     else {
-        /* If we reach here, Wi-Fi failed, timed out, or had < 3 APs */
-        LOG_INF("Wi-Fi failed or timed out. Attempting GNSS Localization.");
+        LOG_INF("GNSS Timeout, attempting LTE...");
+        k_sem_reset(&lte_connected);
+        if (k_sem_take(&lte_connected, K_SECONDS(60)) == 0) {
+            struct modem_param_info modem_param = {0};
+            modem_info_params_init(&modem_param);
+            modem_info_params_get(&modem_param);
 
-        /* STEP 2: GNSS */
-        if (do_gnss_fix() == 0) {
-            LOG_INF("GNSS Fix acquired.");
-            //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
-            
-            snprintf(payload, sizeof(payload), 
-                "{\"status\":\"%s\", \"battery\":%d, \"gnss\":{\"lat\":%.6f, \"lon\":%.6f, \"accuracy\":%.1f}}", 
-                current_status, batt, last_pvt.latitude, last_pvt.longitude, (double)last_pvt.accuracy);
-        } 
-        else {
-            LOG_INF("GNSS Timeout, attempting LTE...");
-            //lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
-            
-            /* STEP 3: LTE CELL ID */
-            k_sem_reset(&lte_connected);
-            if (k_sem_take(&lte_connected, K_SECONDS(60)) == 0) {
-                struct modem_param_info modem_param = {0};
-                modem_info_params_init(&modem_param);
-                modem_info_params_get(&modem_param);
-                
-                char *cellid_str = modem_param.network.cellid_hex.value_string;
-                uint32_t eci = (cellid_str && strlen(cellid_str) > 0) ? strtol(cellid_str, NULL, 16) : 0;
-                uint16_t mcc = modem_param.network.mcc.value;
-                uint16_t mnc = modem_param.network.mnc.value;
-                uint32_t tac = modem_param.network.area_code.value;
+            char *cellid_str = modem_param.network.cellid_hex.value_string;
+            uint32_t eci = (cellid_str && strlen(cellid_str) > 0) ? strtol(cellid_str, NULL, 16) : 0;
+            uint16_t mcc = modem_param.network.mcc.value;
+            uint16_t mnc = modem_param.network.mnc.value;
+            uint32_t tac = modem_param.network.area_code.value;
 
-                snprintf(payload, sizeof(payload), 
-                    "{\"status\":\"%s\", \"battery\":%d, \"lte\":{\"mcc\":%d, \"mnc\":%d, \"tac\":%d, \"eci\":%u}}", 
-                    current_status, batt, mcc, mnc, tac, eci);
-            } else {
-                LOG_ERR("LTE Reconnect failed. Fallback payload.");
-                snprintf(payload, sizeof(payload), 
-                    "{\"status\":\"%s\", \"battery\":%d}", current_status, batt);
-            }
+            snprintf(payload, sizeof(payload),
+                "{\"status\":\"%s\", \"battery\":%d, \"lte\":{\"mcc\":%d, \"mnc\":%d, \"tac\":%d, \"eci\":%u}}",
+                current_status, batt, mcc, mnc, tac, eci);
+        } else {
+            LOG_ERR("LTE Reconnect failed. Fallback payload.");
+            snprintf(payload, sizeof(payload),
+                "{\"status\":\"%s\", \"battery\":%d}", current_status, batt);
         }
     }
 
-    /* Transmit via MQTT */
     LOG_INF("Publishing Payload: %s", payload);
     if (lte_mqtt_publish_str(payload) != 0) {
         LOG_ERR("Failed to publish! (TODO: Save to SPI Flash NVS here)");
     }
+#endif /* CONFIG_LOC_WIFI_ONLY */
 }
+
 
 /* ==================================================================
  * DEDICATED THREAD: LOCALIZATION
@@ -576,11 +603,6 @@ void comms_send_alert(enum alert_reason reason)
 int comms_init(void)
 {
     int err;
-
-    /* Initialize the PMIC GPIO pin for Wi-Fi power to OFF */
-    if (gpio_is_ready_dt(&pmic_wifi_en)) {
-        gpio_pin_configure_dt(&pmic_wifi_en, GPIO_OUTPUT_INACTIVE);
-    }
 
     /* Register callbacks for wifi scan results and scan completion.*/
     net_mgmt_init_event_callback(
@@ -674,11 +696,15 @@ void comms_safe_disconnect(void)
     if (mqtt_is_connected) {
         LOG_INF("Disconnecting MQTT...");
         mqtt_helper_disconnect();
-        k_msleep(500); // Give the TCP socket a moment to close
+        k_msleep(1000); /* Give TCP time to actually close the socket */
+        mqtt_is_connected = false;
     }
 
     LOG_INF("Gracefully detaching from LTE network...");
-    lte_lc_power_off(); // Sends the Detach Request to the cell tower
+    lte_lc_power_off(); /* Sends the Detach Request to the cell tower */
+    
+    /* Reset the semaphore so mqtt_ensure_connected waits next time */
+    k_sem_reset(&lte_connected); 
     
     LOG_INF("=== SAFE TO POWER OFF OR FLASH NEW CODE ===");
 }

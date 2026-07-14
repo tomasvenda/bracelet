@@ -17,6 +17,7 @@ enum bracelet_event_type {
     EVENT_TIMER_10MIN_EXPIRED,
     EVENT_SERVER_WIFI_SUCCESS,    // WiFi scanning success on server side
     EVENT_SERVER_WIFI_FAIL,     // WiFi scanning failed on server side  
+    EVENT_STATE_TIMEOUT,     /* Per-state watchdog (LOCATION_PING / ALERT) */
 };
 
 /* The ZBUS message payload */
