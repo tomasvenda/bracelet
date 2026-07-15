@@ -4,7 +4,7 @@ menu "Bracelet Tracker Settings"
 
 config LOC_WIFI_ONLY
     bool "Wi-Fi-only localization (skip GNSS/LTE fallback)"
-    default y
+    default n
     help
       When enabled, the localization waterfall stops after the Wi-Fi
       step: on failure it publishes a bare status payload instead of

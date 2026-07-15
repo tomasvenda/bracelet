@@ -36,6 +36,8 @@ K_EVENT_DEFINE(app_events); // event flag used purely for the Wi-Fi localisation
 
 #define WIFI_EVT_SUCCESS BIT(0)
 #define WIFI_EVT_FAIL    BIT(1)
+#define LOC_EVT_VERDICT  BIT(2)  /* located_home/located_away arrived */
+#define LOC_EVT_ABORT    BIT(3)  /* alert preemption: bail out of waits */
 
 #define MQTT_TOPIC "bracelet/prototype_pcb/data"
 #define CLIENT_ID "prototype_pcb"
@@ -71,10 +73,18 @@ static bool bootstrap_sent = false;
 static bool mqtt_is_connected = false;
 static const char *current_status = "ok"; 
 
-#define MAX_APS_PER_SCAN 10
+#define MAX_APS_PER_SCAN 20
 static struct ap_data_t { char mac[18]; int8_t rssi; } best_aps[MAX_APS_PER_SCAN];
 static struct nrf_modem_gnss_pvt_data_frame last_pvt;
 static bool gnss_has_fix = false;
+
+/* Set by comms_send_alert() to preempt a ROUTINE waterfall mid-flight
+ * (e.g. during the 180 s GNSS wait). Cleared when a new run starts.
+ * Declared up here because do_gnss_fix()/perform_localization_work()
+ * reference it before the thread section. */
+static atomic_t loc_abort = ATOMIC_INIT(0);
+/* True while the in-flight run carries alert status (fall/panic). */
+static bool run_is_alert;
 static uint32_t current_ap_count;  // Number of AP's that are confirmed and stored
 static uint32_t scan_result;    // Number of AP's reported during a scan
 
@@ -120,7 +130,7 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
                  entry->mac[0], entry->mac[1], entry->mac[2], 
                  entry->mac[3], entry->mac[4], entry->mac[5]);
 
-        /* Prevent duplicates and store top 10 strongest signals */
+        /* Prevent duplicates and store the MAX_APS_PER_SCAN strongest signals */
         bool duplicate = false;
         for (int i = 0; i < current_ap_count; i++) {
             if (strcmp(best_aps[i].mac, mac_string_buf) == 0) duplicate = true;
@@ -165,6 +175,31 @@ static void gnss_event_handler(int event)
 {
     if (event == NRF_MODEM_GNSS_EVT_PVT) {
         if (nrf_modem_gnss_read(&last_pvt, sizeof(last_pvt), NRF_MODEM_GNSS_DATA_PVT) == 0) {
+
+            /* Print every tracked satellite each PVT (once per second in
+             * continuous mode). C/N0 is reported in 0.1 dB-Hz units.
+             * Runs in ISR context, so keep it to printk and no blocking. */
+            int tracked = 0;
+            int used = 0;
+            for (int i = 0; i < NRF_MODEM_GNSS_MAX_SATELLITES; i++) {
+                if (last_pvt.sv[i].sv == 0) {
+                    continue; /* empty slot */
+                }
+                tracked++;
+                bool in_fix = last_pvt.sv[i].flags &
+                              NRF_MODEM_GNSS_SV_FLAG_USED_IN_FIX;
+                if (in_fix) {
+                    used++;
+                }
+                printk("  SV %3u  C/N0 %2u.%u dB-Hz  elev %2d  %s\n",
+                       last_pvt.sv[i].sv,
+                       last_pvt.sv[i].cn0 / 10, last_pvt.sv[i].cn0 % 10,
+                       last_pvt.sv[i].elevation,
+                       in_fix ? "[in fix]" : "");
+            }
+            printk("GNSS: tracking %d satellites (%d used in fix)\n",
+                   tracked, used);
+
             if (last_pvt.flags & NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID) {
                 LOG_INF("GNSS FIX ACQUIRED! Lat: %.6f, Lon: %.6f", last_pvt.latitude, last_pvt.longitude);
                 gnss_has_fix = true;
@@ -255,10 +290,12 @@ static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf
     if (strstr(buf, "located_home")) {
         event.type = EVENT_SERVER_REPLY_HOME;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+        k_event_post(&app_events, LOC_EVT_VERDICT);
     } 
     else if (strstr(buf, "located_away")) {
         event.type = EVENT_SERVER_REPLY_AWAY;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+        k_event_post(&app_events, LOC_EVT_VERDICT);
     }
     else if (strstr(buf, "\"ack\": true")) {
         event.type = EVENT_SERVER_ACK_ALERT;
@@ -361,14 +398,9 @@ int do_wifi_scan(void){
     }
     LOG_INF("[OK]   Wi-Fi net_if found (index=%d).", net_if_get_by_iface(iface));
 
-    // CALLBACK REGISTERED HERE TOO ONLY FOR DEBUG
-    net_mgmt_init_event_callback(
-        &wifi_cb,
-        wifi_event_handler,
-        NET_EVENT_WIFI_SCAN_RESULT |
-        NET_EVENT_WIFI_SCAN_DONE);
-    
-    net_mgmt_add_event_callback(&wifi_cb);
+    /* FIX: callback is already registered once in comms_init().
+     * Re-adding the same net_mgmt_event_callback node corrupts the
+     * event callback list (same slist node inserted twice). */
 
     struct wifi_scan_params params = {0};
 
@@ -389,6 +421,7 @@ int do_wifi_scan(void){
 
     scan_result = 0;
     current_ap_count = 0;
+    k_sem_reset(&wifi_scan_sem); /* drop any stale/abort-time token */
 
     // Sends the scan request to the driver
     int ret = net_mgmt(
@@ -414,17 +447,49 @@ int do_wifi_scan(void){
 static int do_gnss_fix(void)
 {
     gnss_has_fix = false;
+    
+    /* VERY IMPORTANT: Clear the semaphore in case of stale events 
+     * before we begin waiting. */
+    k_sem_reset(&gnss_fix_sem); 
+
+    if (mqtt_is_connected) {
+        mqtt_helper_disconnect();
+        k_msleep(300);
+        mqtt_is_connected = false;
+    }
+
+    /* FIX: GNSS only gets RF time when LTE is idle. Without PSM/eDRX,
+     * an RRC-connected LTE link (we just published over MQTT) starves
+     * GNSS completely. Take LTE down for the duration of the fix. */
+    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
     lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS);
     
     nrf_modem_gnss_fix_interval_set(0);    /* Single fix mode */
     nrf_modem_gnss_fix_retry_set(180);     /* 180s hardware timeout */
     nrf_modem_gnss_start();
 
+    LOG_INF("Searching for GNSS satellites (up to 3 minutes)...");
+    
+    /* Wait for the event handler to give the semaphore upon a valid fix */
     int res = k_sem_take(&gnss_fix_sem, K_SECONDS(180));
     
     nrf_modem_gnss_stop();
     lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS);
-    return (res == 0) ? 0 : -ETIMEDOUT;
+
+    /* On abort, leave LTE DOWN: if this is an ACK-abort the FSM is
+     * powering the modem off for deep sleep right now, and racing it
+     * with ACTIVATE_LTE leaves the modem on while the device sleeps.
+     * The next waterfall's mqtt_ensure_connected() wakes LTE itself. */
+    if (atomic_get(&loc_abort)) {
+        LOG_WRN("GNSS search aborted.");
+        return -ECANCELED;
+    }
+
+    /* Restore LTE so the payload can be published afterwards. */
+    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
+    
+    /* Sem can also be given by an abort race; trust the fix flag. */
+    return (res == 0 && gnss_has_fix) ? 0 : -ETIMEDOUT;
 }
 
 /* ------------------------------------------------------------------
@@ -432,10 +497,26 @@ static int do_gnss_fix(void)
  * ------------------------------------------------------------------ */
 static void perform_localization_work(void)
 {
-    static char payload[1024]; 
+    static char payload[2048]; 
     int offset = 0;
     int batt = get_battery_level();
     int aps = 0;
+
+    /* This run owns the abort flag from here on. */
+    atomic_clear(&loc_abort);
+    k_event_clear(&app_events, LOC_EVT_ABORT);
+
+    /* STEP 0: ALERT runs inform the server FIRST, before any
+     * localization. The status (fall/panic) is the life-critical
+     * part; the position refines it afterwards. */
+    if (strcmp(current_status, "ok") != 0) {
+        LOG_WRN("ALERT run: notifying server before localization.");
+        snprintf(payload, sizeof(payload),
+            "{\"status\":\"%s\", \"battery\":%d}", current_status, batt);
+        if (lte_mqtt_publish_str(payload) != 0) {
+            LOG_ERR("Immediate alert notify failed; continuing to localize.");
+        }
+    }
 
     /* STEP 1: WI-FI */
     
@@ -467,29 +548,64 @@ static void perform_localization_work(void)
     }
     k_sleep(K_MSEC(500));
     
+    /* Abort check BEFORE re-activating LTE: on an ACK-abort the FSM
+     * is shutting the modem down for deep sleep; on an alert-abort
+     * the alert run wakes LTE itself. Either way, leave it down. */
+    if (atomic_get(&loc_abort)) {
+        LOG_WRN("Localization run aborted.");
+        return;
+    }
+
     lte_lc_normal();
     // sketchy
     /* Return to normal cellular operation */
     //lte_lc_connect_async(lte_handler);    
 
     if (aps > 0) {
-        /* Build the Wi-Fi Payload (any AP count -- server judges) */
-        offset = snprintf(payload, sizeof(payload),
+        /* payload[2048] safely holds 20+ APs (~58 B each + header) */
+        offset = 0;
+        int remaining = sizeof(payload);
+        int written = 0;
+
+        /* Build the header */
+        written = snprintf(payload + offset, remaining,
             "{\"status\":\"%s\", \"battery\":%d, \"wifi\":{\"accessPoints\":[", current_status, batt);
+        offset += written;
+        remaining -= written;
+
         for (int i = 0; i < aps; i++) {
-            offset += snprintf(payload + offset, sizeof(payload) - offset,
+            /* Worst-case AP entry is ~58 bytes; keep headroom for it
+             * plus the closing brackets so JSON is never truncated
+             * mid-object (which would also desync offset/remaining). */
+            if (remaining < 64) {
+                LOG_WRN("Payload buffer full! Truncating Wi-Fi list at %d APs.", i);
+                break; 
+            }
+
+            written = snprintf(payload + offset, remaining,
                 "{\"macAddress\":\"%s\",\"signalStrength\":%d}%s",
                 best_aps[i].mac, best_aps[i].rssi, (i < aps - 1) ? "," : "");
+            
+            offset += written;
+            remaining -= written;
         }
-        snprintf(payload + offset, sizeof(payload) - offset, "]}}");
 
-        LOG_INF("Publishing Wi-Fi Payload: %s", payload);
+        /* Build the footer */
+        snprintf(payload + offset, remaining, "]}}");
+
+        LOG_INF("Publishing Wi-Fi Payload (%d bytes)", offset);
         lte_mqtt_publish_str(payload);
 
         k_event_clear(&app_events, WIFI_EVT_SUCCESS | WIFI_EVT_FAIL);
         uint32_t events = k_event_wait(&app_events,
-                                       WIFI_EVT_SUCCESS | WIFI_EVT_FAIL,
+                                       WIFI_EVT_SUCCESS | WIFI_EVT_FAIL |
+                                       LOC_EVT_ABORT,
                                        false, K_SECONDS(10));
+
+        if ((events & LOC_EVT_ABORT) || atomic_get(&loc_abort)) {
+            LOG_WRN("Routine localization aborted; alert run is queued.");
+            return;
+        }
 
         if (events & WIFI_EVT_SUCCESS) {
             LOG_INF("Server confirmed Wi-Fi localization -> done.");
@@ -520,7 +636,13 @@ static void perform_localization_work(void)
     /* ===== FALLBACK WATERFALL (enabled when LOC_WIFI_ONLY=n) ===== */
     LOG_INF("Wi-Fi failed or inconclusive. Attempting GNSS Localization.");
 
-    if (do_gnss_fix() == 0) {
+    int gnss_res = do_gnss_fix();
+    if (gnss_res == -ECANCELED) {
+        /* Aborted by alert: LTE already restored inside do_gnss_fix,
+         * and the alert waterfall is queued. Leave immediately. */
+        return;
+    }
+    if (gnss_res == 0) {
         LOG_INF("GNSS Fix acquired.");
         snprintf(payload, sizeof(payload),
             "{\"status\":\"%s\", \"battery\":%d, \"gnss\":{\"lat\":%.6f, \"lon\":%.6f, \"accuracy\":%.1f}}",
@@ -528,8 +650,18 @@ static void perform_localization_work(void)
     }
     else {
         LOG_INF("GNSS Timeout, attempting LTE...");
-        k_sem_reset(&lte_connected);
-        if (k_sem_take(&lte_connected, K_SECONDS(60)) == 0) {
+        /* FIX: if LTE is already registered, no new NW_REG event will
+         * arrive and waiting on the semaphore times out after 60 s even
+         * though cell info is available right now. Check status first. */
+        enum lte_lc_nw_reg_status reg;
+        bool lte_ready = (lte_lc_nw_reg_status_get(&reg) == 0) &&
+                         (reg == LTE_LC_NW_REG_REGISTERED_HOME ||
+                          reg == LTE_LC_NW_REG_REGISTERED_ROAMING);
+        if (!lte_ready) {
+            k_sem_reset(&lte_connected);
+            lte_ready = (k_sem_take(&lte_connected, K_SECONDS(60)) == 0);
+        }
+        if (lte_ready) {
             struct modem_param_info modem_param = {0};
             modem_info_params_init(&modem_param);
             modem_info_params_get(&modem_param);
@@ -551,8 +683,24 @@ static void perform_localization_work(void)
     }
 
     LOG_INF("Publishing Payload: %s", payload);
+    k_event_clear(&app_events, LOC_EVT_VERDICT);
     if (lte_mqtt_publish_str(payload) != 0) {
         LOG_ERR("Failed to publish! (TODO: Save to SPI Flash NVS here)");
+    } else {
+        /* The Wi-Fi path waits for a verdict; this path must too,
+         * otherwise the next waterfall tears MQTT down ~300 ms after
+         * publish and the server's located_home/away reply hits a
+         * dead socket (verdict lost even though the server resolved). */
+        uint32_t ev = k_event_wait(&app_events,
+                                   LOC_EVT_VERDICT | LOC_EVT_ABORT,
+                                   false, K_SECONDS(10));
+        if (ev & LOC_EVT_ABORT) {
+            LOG_WRN("Verdict wait aborted.");
+        } else if (ev & LOC_EVT_VERDICT) {
+            LOG_INF("Server verdict received for GNSS/LTE payload.");
+        } else {
+            LOG_WRN("No server verdict within 10 s of GNSS/LTE payload.");
+        }
     }
 #endif /* CONFIG_LOC_WIFI_ONLY */
 }
@@ -563,6 +711,11 @@ static void perform_localization_work(void)
  * ================================================================== */
 K_SEM_DEFINE(loc_start_sem, 0, 1);
 
+/* Set while a localization waterfall is running. Periodic tracking
+ * pings are skipped when busy (they'd only queue an immediate
+ * back-to-back rerun); alerts always queue regardless. */
+static atomic_t loc_busy = ATOMIC_INIT(0);
+
 static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
 {
     while (1) {
@@ -570,7 +723,10 @@ static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
         k_sem_take(&loc_start_sem, K_FOREVER);
         
         /* Run the waterfall without blocking Zephyr! */
+        run_is_alert = (strcmp(current_status, "ok") != 0);
+        atomic_set(&loc_busy, 1);
         perform_localization_work();
+        atomic_set(&loc_busy, 0);
     }
 }
 
@@ -582,19 +738,57 @@ K_THREAD_DEFINE(loc_thread, 4096, localization_thread_fn, NULL, NULL, NULL, K_PR
  * ------------------------------------------------------------------ */
 void comms_update_localization(void)
 {
+    if (atomic_get(&loc_busy)) {
+        LOG_INF("Localization already in progress; skipping this ping.");
+        return;
+    }
     current_status = "ok";
     k_sem_give(&loc_start_sem); /* Wake the thread */
 }
 
-// Clears the current status from alert
+// Clears the current status from alert. Called on server ACK.
 void comms_clear_alert(void) {
     current_status = "ok";
+
+    /* The emergency is acknowledged: a still-running alert waterfall
+     * is now a zombie (it would grind GNSS for minutes while the FSM
+     * sleeps). Abort it and drop any queued re-run so the device can
+     * actually go quiet -- and so the NEXT button press starts a
+     * completely fresh alert instead of deferring to the zombie. */
+    if (atomic_get(&loc_busy)) {
+        LOG_WRN("Server ACK: aborting in-flight alert waterfall.");
+        atomic_set(&loc_abort, 1);
+        k_sem_give(&gnss_fix_sem);
+        k_sem_give(&wifi_scan_sem);
+        k_event_post(&app_events, LOC_EVT_ABORT);
+    }
+    k_sem_reset(&loc_start_sem); /* drop queued re-send, if any */
 }
 
 void comms_send_alert(enum alert_reason reason)
 {
     current_status = (reason == REASON_FALL_DETECTED) ? "fall" : "panic";
-    k_sem_give(&loc_start_sem); /* Wake the thread */
+
+    if (atomic_get(&loc_busy)) {
+        if (run_is_alert) {
+            /* An alert waterfall is already in flight and has already
+             * notified the server. Let it finish; do NOT abort it or
+             * the 60 s re-send timer would kill its own GNSS attempt
+             * every cycle. A fresh run starts once it completes. */
+            LOG_WRN("Alert waterfall already in flight; not restarting it.");
+            k_sem_give(&loc_start_sem);
+            return;
+        }
+        /* ROUTINE run in flight: ABORT IT. Unblock every wait it
+         * could be sitting in so it falls through immediately. */
+        LOG_WRN("ALERT! Aborting in-flight routine localization.");
+        atomic_set(&loc_abort, 1);
+        k_sem_give(&gnss_fix_sem);              /* break 180 s GNSS wait */
+        k_sem_give(&wifi_scan_sem);             /* break 20 s scan wait  */
+        k_event_post(&app_events, LOC_EVT_ABORT); /* break verdict waits */
+    }
+
+    k_sem_give(&loc_start_sem); /* Queue the alert waterfall */
 }
 
 /* ------------------------------------------------------------------
@@ -613,12 +807,6 @@ int comms_init(void)
     
     net_mgmt_add_event_callback(&wifi_cb);
 
-    /* Register callback for gnss */
-    nrf_modem_gnss_event_handler_set(gnss_event_handler);
-
-    /* Connecting to LTE */
-    LOG_INF("Connecting to LTE network... (This may take a few seconds)");
-    
     LOG_INF("Initializing modem library...");
     err = nrf_modem_lib_init();
     if (err) {
@@ -626,6 +814,29 @@ int comms_init(void)
         return -1;
     }
 
+    /* Register callback for gnss.
+     * FIX: must be done AFTER nrf_modem_lib_init() -- calling any
+     * nrf_modem_gnss_* API before modem init fails, and the error
+     * was not checked, so the handler was never registered. */
+    err = nrf_modem_gnss_event_handler_set(gnss_event_handler);
+    if (err) {
+        LOG_ERR("Failed to set GNSS event handler: %d", err);
+        return -1;
+    }
+
+    /* ==========================================================
+     * NEW: Enable COEX0 for the external GNSS LNA
+     * Must be sent here, before LTE is activated!
+     * ========================================================== */
+    err = nrf_modem_at_printf("AT%%XCOEX0=1,1,1565,1586");
+    if (err) {
+        LOG_ERR("Failed to configure COEX0 for LNA: %d", err);
+    } else {
+        LOG_INF("COEX0 configured: External LNA enabled for GNSS");
+    }
+
+    /* Connecting to LTE */
+    LOG_INF("Connecting to LTE network... (This may take a few seconds)");
     err = lte_lc_connect_async(lte_handler);
     if (err) {
         LOG_ERR("LTE connect async failed, err %d", err);

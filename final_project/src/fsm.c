@@ -50,6 +50,50 @@ static void state_timeout_cb(struct k_timer *timer_id) {
 }
 K_TIMER_DEFINE(state_timeout_timer, state_timeout_cb, NULL);
 
+/*===============================================================*/
+/* ALERT beep pattern: 200 ms ON / 1800 ms OFF.                  */
+/* A continuous buzzer + red LED + nRF7002 scan TX bursts        */
+/* browned out the board; pulsing removes the standing load and  */
+/* makes overlap with radio TX peaks unlikely.                   */
+/* Timer fires in ISR context, so the buzzer driver is driven    */
+/* from a work item instead.                                     */
+/*===============================================================*/
+static bool beep_is_on;
+static void beep_timer_cb(struct k_timer *timer_id);
+K_TIMER_DEFINE(alert_beep_timer, beep_timer_cb, NULL);
+
+static void beep_work_fn(struct k_work *work) {
+    if (beep_is_on) {
+        sensors_buzzer_off();
+        beep_is_on = false;
+        k_timer_start(&alert_beep_timer, K_MSEC(1800), K_NO_WAIT);
+    } else {
+        sensors_buzzer_on();
+        beep_is_on = true;
+        k_timer_start(&alert_beep_timer, K_MSEC(200), K_NO_WAIT);
+    }
+}
+K_WORK_DEFINE(alert_beep_work, beep_work_fn);
+
+/* Remaining cooldown time captured on exit, so a false-alarm
+ * round-trip through EVALUATION can resume it instead of losing it. */
+static uint32_t cooldown_remaining_ms;
+
+static void beep_timer_cb(struct k_timer *timer_id) {
+    k_work_submit(&alert_beep_work);
+}
+
+static void alert_beep_start(void) {
+    beep_is_on = false;
+    k_work_submit(&alert_beep_work);   /* first beep immediately */
+}
+
+static void alert_beep_stop(void) {
+    k_timer_stop(&alert_beep_timer);
+    sensors_buzzer_off();
+    beep_is_on = false;
+}
+
 /* Forward declaration of the state table */
 static const struct smf_state states[];
 
@@ -95,8 +139,19 @@ static void deep_sleep_entry(void *o) {
         is_first_run = false;
     } 
     else if (fsm.previous_state == STATE_EVALUATION) {
-        printf("[DEEP SLEEP] Returned from False Alarm. IMU wake stays armed.\n");
-        sensors_enable_motion_trigger();
+        /* Restore exactly what was true before the impact interrupted us:
+         * if the 10-min cooldown was still pending, resume it with the
+         * remaining time (trigger stays disarmed); if it had already
+         * expired, the motion trigger was armed, so re-arm it. */
+        if (cooldown_remaining_ms > 0) {
+            printf("[DEEP SLEEP] False alarm. Resuming cooldown (%u s left).\n",
+                   cooldown_remaining_ms / 1000U);
+            sensors_disable_motion_trigger();
+            k_timer_start(&cooldown_timer, K_MSEC(cooldown_remaining_ms), K_NO_WAIT);
+        } else {
+            printf("[DEEP SLEEP] False alarm. Cooldown already over; re-arming IMU wake.\n");
+            sensors_enable_motion_trigger();
+        }
     } 
     else {
         printf("[DEEP SLEEP] Network cycle complete. Starting 10-minute cooldown timer.\n");
@@ -107,7 +162,10 @@ static void deep_sleep_entry(void *o) {
     fsm.previous_state = STATE_DEEP_SLEEP;
 }
 
+
+
 static void deep_sleep_exit(void *o) {
+    cooldown_remaining_ms = k_timer_remaining_get(&cooldown_timer);
     k_timer_stop(&cooldown_timer);
 }
 
@@ -133,7 +191,7 @@ static void location_ping_entry(void *o) {
     sensors_disable_motion_trigger();
     comms_update_localization();
     /* Never wait forever for the server verdict */
-    k_timer_start(&state_timeout_timer, K_SECONDS(45), K_NO_WAIT);
+    k_timer_start(&state_timeout_timer, K_SECONDS(270), K_NO_WAIT);
 }
 
 static void location_ping_exit(void *o) {
@@ -148,7 +206,7 @@ static enum smf_state_result location_ping_run(void *o) {
     } else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
     } else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
-        printf("[LOCATION PING] No server verdict in 45s. Failing safe -> ACTIVE_TRACKING.\n");
+        printf("[LOCATION PING] No server verdict in time. Failing safe -> ACTIVE_TRACKING.\n");
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
     }
 
@@ -269,7 +327,7 @@ static void alert_entry(void *o) {
     /* Turn OFF Blue (in case of panic button) and turn ON Red */
     sensors_led_off(LED_BLUE);
     sensors_led_on(LED_RED);
-    sensors_buzzer_on();
+    alert_beep_start();   /* pulsed: 200 ms on / 1.8 s off */
 
     comms_send_alert(pending_alert_reason);
     /* Re-send the alert every 60 s until the server acks */
@@ -278,13 +336,14 @@ static void alert_entry(void *o) {
 
 static void alert_exit(void *o) {
     k_timer_stop(&state_timeout_timer);
+    alert_beep_stop();   /* never let the beeper outlive ALERT */
 }
 
 static enum smf_state_result alert_run(void *o) {
 
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
         sensors_led_off(LED_RED);
-        sensors_buzzer_off();
+        alert_beep_stop();
 
         comms_clear_alert();
 
