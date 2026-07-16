@@ -9,6 +9,8 @@
 #include <zephyr/sys/atomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/sensor/npm13xx_charger.h>
 
 #include "bmi2_defs.h"
 #include "bmi270_legacy.h"
@@ -33,6 +35,10 @@ static const struct i2c_dt_spec icp_i2c = I2C_DT_SPEC_GET(ICP201XX_NODE);
 static const struct gpio_dt_spec bmi_int = GPIO_DT_SPEC_GET(BMI270_NODE, irq_gpios);
 static const struct gpio_dt_spec button  = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static const struct device *const pwm_dev = DEVICE_DT_GET(PWM_CTLR_NODE);
+
+/* Used for battery measurements */
+#define NPM1300_CHARGER_NODE DT_NODELABEL(npm1300_charger)
+static const struct device *const charger_dev = DEVICE_DT_GET(NPM1300_CHARGER_NODE);
 
 /* ======================================================================
  * BMI270 / ICP-20100 REGISTERS & WINDOW GEOMETRY (from the logger)
@@ -123,8 +129,6 @@ void sensors_evaluation_done(void)
 {
     atomic_clear(&capture_pending);
 }
-
-
 
 /* ======================================================================
  * ISRs -- fast paths only (no I2C allowed here)
@@ -595,4 +599,89 @@ int sensors_init(void)
     atomic_set(&sensors_ready, 1);
     LOG_INF("[SENSORS] All hardware initialised (low-g + any-motion armed).");
     return 0;
+}
+
+
+/* Returns approx battery level from voltage for current 3.7V battery*/
+static int battery_mv_to_pct(int32_t mv)
+{
+    static const struct {
+        int32_t mv;
+        int pct;
+    } lut[] = {
+        {4200, 100},
+        {4100, 90},
+        {4000, 80},
+        {3920, 70},
+        {3850, 60},
+        {3790, 50},
+        {3730, 40},
+        {3670, 30},
+        {3600, 20},
+        {3500, 10},
+        {3300, 0},
+    };
+
+    if (mv >= lut[0].mv) return 100;
+    if (mv <= lut[ARRAY_SIZE(lut) - 1].mv) return 0;
+
+    for (size_t i = 0; i < ARRAY_SIZE(lut) - 1; i++) {
+        if (mv <= lut[i].mv && mv >= lut[i + 1].mv) {
+            int32_t mv_hi = lut[i].mv;
+            int32_t mv_lo = lut[i + 1].mv;
+            int pct_hi = lut[i].pct;
+            int pct_lo = lut[i + 1].pct;
+            return pct_lo + (mv - mv_lo) * (pct_hi - pct_lo) / (mv_hi - mv_lo);
+        }
+    }
+
+    return 0;
+}
+
+/* Public function used to get the battery level */
+int get_battery_level(void)
+{
+    struct sensor_value vbat;
+    struct sensor_value chg_status;
+    struct sensor_value vbus_status;
+    struct sensor_value chg_error;
+    int ret;
+    int32_t mv;
+
+    ret = sensor_sample_fetch(charger_dev);
+    if (ret) {
+        LOG_ERR("Battery sample fetch failed: %d", ret);
+        return 0;
+    }
+
+    ret = sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &vbat);
+    if (ret) {
+        LOG_ERR("Battery voltage read failed: %d", ret);
+        return 0;
+    }
+
+    ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &chg_status);
+    if (ret) {
+        LOG_WRN("Charger status read failed: %d", ret);
+        chg_status.val1 = -1;
+    }
+
+    ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS, &vbus_status);
+    if (ret) {
+        LOG_WRN("VBUS status read failed: %d", ret);
+        vbus_status.val1 = -1;
+    }
+
+    ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_ERROR, &chg_error);
+    if (ret) {
+        LOG_WRN("Charger error read failed: %d", ret);
+        chg_error.val1 = -1;
+    }
+
+    mv = (vbat.val1 * 1000) + (vbat.val2 / 1000);
+
+    LOG_INF("Battery: %d mV | status_bits=0x%02x | vbus_bits=0x%02x | error_bits=0x%02x",
+        mv, chg_status.val1, vbus_status.val1, chg_error.val1);
+
+    return battery_mv_to_pct(mv);
 }

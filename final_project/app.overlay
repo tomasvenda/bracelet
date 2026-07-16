@@ -112,7 +112,9 @@
             current-microamp = <150000>;
             dischg-limit-microamp = <1000000>;
             thermistor-ohms = <10000>;
-            thermistor-beta = <3380>;
+            thermistor-beta = <3435>;
+
+            charging-enable;
         };
 
     };

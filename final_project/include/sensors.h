@@ -44,4 +44,7 @@ void sensors_buzzer_on(void);
 void sensors_buzzer_off(void);
 void sensors_evaluation_done(void);
 
+/*Battery approx percentage function*/
+int get_battery_level(void);
+
 #endif /* SENSORS_H */

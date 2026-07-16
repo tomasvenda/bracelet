@@ -125,7 +125,7 @@ static enum alert_reason pending_alert_reason = REASON_BUTTON_PRESSED;
 static void deep_sleep_entry(void *o) {
     printf("[STATE] Entered DEEP_SLEEP. MCU sleeping. LTE/GNSS off.\n");
 
-    /* HYGIENE: Ensure Blue LED turns off when going back to sleep */
+    /* Ensure Blue LED turns off when going back to sleep */
     sensors_led_off(LED_BLUE);
 
     /* 1. Sever the connection gracefully to save maximum battery */
@@ -408,7 +408,17 @@ void fsm_thread_main(void)
              * newest twice and silently drop the older one. */
 
             if (fsm.current_event.type == EVENT_BUTTON_PRESSED) {
+                /* Already in ALERT: ignore repeat presses. Re-entering
+                 * would reset the acked/stack-done flags, restart the
+                 * beeper, and queue a redundant waterfall. One alert
+                 * at a time; it ends via ack + stack completion. */
+                if (SMF_CTX(&fsm)->current == &states[STATE_ALERT]) {
+                    printf("[FSM] Button ignored: already in ALERT.\n");
+                    continue;
+                }
+
                 pending_alert_reason = REASON_BUTTON_PRESSED;
+                
                 smf_set_state(SMF_CTX(&fsm), &states[STATE_ALERT]);
                 continue;
             }

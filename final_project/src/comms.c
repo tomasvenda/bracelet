@@ -20,6 +20,7 @@
 
 #include "events.h"
 #include "comms.h"
+#include "sensors.h"
 
 LOG_MODULE_REGISTER(comms_system, LOG_LEVEL_INF);
 
@@ -87,9 +88,6 @@ static atomic_t loc_abort = ATOMIC_INIT(0);
 static bool run_is_alert;
 static uint32_t current_ap_count;  // Number of AP's that are confirmed and stored
 static uint32_t scan_result;    // Number of AP's reported during a scan
-
-/* Dummy battery function - Replace with actual ADC logic later */
-static int get_battery_level(void) { return 85; }
 
 /* ------------------------------------------------------------------
  * EVENT HANDLERS (WIFI & GNSS)
@@ -471,7 +469,7 @@ static int do_gnss_fix(void)
     LOG_INF("Searching for GNSS satellites (up to 3 minutes)...");
     
     /* Wait for the event handler to give the semaphore upon a valid fix */
-    int res = k_sem_take(&gnss_fix_sem, K_SECONDS(180));
+    int res = k_sem_take(&gnss_fix_sem, K_SECONDS(10));
     
     nrf_modem_gnss_stop();
     lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS);
@@ -516,6 +514,8 @@ static void perform_localization_work(void)
         if (lte_mqtt_publish_str(payload) != 0) {
             LOG_ERR("Immediate alert notify failed; continuing to localize.");
         }
+        // Reset status to not send multiple panics:
+        current_status = "ok";
     }
 
     /* STEP 1: WI-FI */
@@ -608,10 +608,10 @@ static void perform_localization_work(void)
         }
 
         if (events & WIFI_EVT_SUCCESS) {
-            LOG_INF("Server confirmed Wi-Fi localization -> done.");
+            LOG_INF("Server confirmed Wi-Fi localization.");
             return;
         } else if (events & WIFI_EVT_FAIL) {
-            LOG_INF("Server rejected Wi-Fi data.");
+            LOG_INF("Server failed to locate the Wi-Fi APs.");
         } else {
             LOG_INF("Server response timeout (10s).");
         }
@@ -900,9 +900,7 @@ int comms_init(void)
 }
 
 void comms_safe_disconnect(void)
-{
-    LOG_WRN("=== SAFE DISCONNECT TRIGGERED ===");
-    
+{    
     if (mqtt_is_connected) {
         LOG_INF("Disconnecting MQTT...");
         mqtt_helper_disconnect();
@@ -915,6 +913,4 @@ void comms_safe_disconnect(void)
     
     /* Reset the semaphore so mqtt_ensure_connected waits next time */
     k_sem_reset(&lte_connected); 
-    
-    LOG_INF("=== SAFE TO POWER OFF OR FLASH NEW CODE ===");
 }
