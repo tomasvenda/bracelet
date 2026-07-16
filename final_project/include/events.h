@@ -11,6 +11,7 @@ enum bracelet_event_type {
     EVENT_SERVER_REPLY_HOME, /* INSIDE GEOFENCE */
     EVENT_SERVER_REPLY_AWAY,      /* OUTSIDE GEOFENCE */
     EVENT_SERVER_ACK_ALERT, /* The server acknowledges the alert */
+    EVENT_LOC_DONE, /* The localization waterfall has finished */
     EVENT_ML_FALL_DETECTED, /* TinyML output */
     EVENT_ML_NO_FALL, /* TinyML output */
     EVENT_TIMER_1MIN_EXPIRED,

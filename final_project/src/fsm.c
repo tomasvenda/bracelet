@@ -320,9 +320,16 @@ static enum smf_state_result evaluation_run(void *o) {
 
 
 // --- ALERT (Emergency) ---
+/* Leaving ALERT requires BOTH: server acked the panic message AND the
+ * alert localization stack ran to completion. Order can be either. */
+static bool alert_acked;
+static bool alert_stack_done;
+
 static void alert_entry(void *o) {
     printf("[STATE] Entered ALERT! Sending emergency payload to server!\n");
     fsm.previous_state = STATE_ALERT;
+    alert_acked = false;
+    alert_stack_done = false;
 
     /* Turn OFF Blue (in case of panic button) and turn ON Red */
     sensors_led_off(LED_BLUE);
@@ -342,15 +349,27 @@ static void alert_exit(void *o) {
 static enum smf_state_result alert_run(void *o) {
 
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
+        /* ACK = "panic received", NOT "emergency over". Silence the
+         * alarm and stop the 60 s re-sends, but the localization
+         * stack keeps running to completion. */
+        printf("[ALERT] Server acked the panic. Alarm off; waiting for stack.\n");
+        alert_acked = true;
         sensors_led_off(LED_RED);
         alert_beep_stop();
-
-        comms_clear_alert();
-
-        smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
+        k_timer_stop(&state_timeout_timer);
+    } else if (fsm.current_event.type == EVENT_LOC_DONE) {
+        printf("[ALERT] Alert localization stack completed.\n");
+        alert_stack_done = true;
     } else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
         printf("[ALERT] No server ack yet. Re-sending alert.\n");
         comms_send_alert(pending_alert_reason);
+    }
+
+    if (alert_acked && alert_stack_done) {
+        /* Panic delivered + stack finished (with or without a
+         * location). Emergency mode continues as high-rate tracking. */
+        comms_clear_alert();
+        smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
     }
 
     return SMF_EVENT_HANDLED;

@@ -603,7 +603,7 @@ static void perform_localization_work(void)
                                        false, K_SECONDS(10));
 
         if ((events & LOC_EVT_ABORT) || atomic_get(&loc_abort)) {
-            LOG_WRN("Routine localization aborted; alert run is queued.");
+            LOG_WRN("Routine localization aborted by alert.");
             return;
         }
 
@@ -727,6 +727,15 @@ static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
         atomic_set(&loc_busy, 1);
         perform_localization_work();
         atomic_set(&loc_busy, 0);
+
+        /* An ALERT stack that ran to completion (any outcome: wifi
+         * verdict, gnss fix, lte fallback, or nothing) tells the FSM,
+         * which then moves to ACTIVE_TRACKING. Not sent if the run
+         * was aborted (only routine runs can be aborted now). */
+        if (run_is_alert && !atomic_get(&loc_abort)) {
+            struct bracelet_event ev = { .type = EVENT_LOC_DONE };
+            zbus_chan_pub(&fsm_events_chan, &ev, K_NO_WAIT);
+        }
     }
 }
 
@@ -748,21 +757,11 @@ void comms_update_localization(void)
 
 // Clears the current status from alert. Called on server ACK.
 void comms_clear_alert(void) {
+    /* The server ACK means "panic message received" -- NOT "emergency
+     * over". It must never abort the localization stack; the alert
+     * run always completes wifi -> gnss -> lte and reports LOC_DONE.
+     * Status flips back to "ok" with the next routine ping. */
     current_status = "ok";
-
-    /* The emergency is acknowledged: a still-running alert waterfall
-     * is now a zombie (it would grind GNSS for minutes while the FSM
-     * sleeps). Abort it and drop any queued re-run so the device can
-     * actually go quiet -- and so the NEXT button press starts a
-     * completely fresh alert instead of deferring to the zombie. */
-    if (atomic_get(&loc_busy)) {
-        LOG_WRN("Server ACK: aborting in-flight alert waterfall.");
-        atomic_set(&loc_abort, 1);
-        k_sem_give(&gnss_fix_sem);
-        k_sem_give(&wifi_scan_sem);
-        k_event_post(&app_events, LOC_EVT_ABORT);
-    }
-    k_sem_reset(&loc_start_sem); /* drop queued re-send, if any */
 }
 
 void comms_send_alert(enum alert_reason reason)
