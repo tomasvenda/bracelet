@@ -1,0 +1,206 @@
+source "Kconfig.zephyr"
+
+menu "Bracelet Tracker Settings"
+
+config LOC_WIFI_ONLY
+    bool "Wi-Fi-only localization (skip GNSS/LTE fallback)"
+    default n
+    help
+      When enabled, the localization waterfall stops after the Wi-Fi
+      step: on failure it publishes a bare status payload instead of
+      attempting GNSS or LTE cell-ID. Disable once the fallback paths
+      are implemented and tested.
+
+config WIFI_MAC_ADDRESS
+    string "WiFi MAC address"
+    default "F6:CE:36:00:00:01"
+    help
+      Wi-Fi MAC address to be used by the sample. If not set, the sample will
+      use the default MAC address (locally administrative). This is only used
+      when the nRF7002 OTP is not programmed with a MAC address.
+
+config WIFI_SCAN_INTERVAL_S
+    int "Scan interval (seconds)"
+    default 10
+    help
+      Specifies the scan interval in seconds.
+
+config WIFI_SCAN_BANDS_LIST
+    string "Frequency bands to scan"
+    default "2" if WIFI_SCAN_PROFILE_2_4GHz_ACTIVE || WIFI_SCAN_PROFILE_2_4GHz_PASSIVE || WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_CHAN
+    default "5" if WIFI_SCAN_PROFILE_5GHz_ACTIVE || WIFI_SCAN_PROFILE_5GHz_PASSIVE || WIFI_SCAN_PROFILE_5GHz_NON_DFS_CHAN
+    default "2,5" if WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHz_NON_DFS_CHAN
+    default ""
+    help
+      Specifies the frequency bands to scan.
+
+config WIFI_SCAN_CHAN_LIST
+    string "Channel list for scan"
+    default "2:1,6,11" if WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_CHAN
+    default "5:36,40,44,48,149,153,157,161,165" if WIFI_SCAN_PROFILE_5GHz_NON_DFS_CHAN
+    default "2:1,6,11_5:36,40,44,48,149,153,157,161,165" if WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHz_NON_DFS_CHAN
+    default ""
+    help
+      Specifies the list of channels used to perform scan.
+
+config WIFI_SCAN_DWELL_TIME_ACTIVE
+	int "Active scan dwell time"
+	default 50
+	range 5 1000
+	help
+	  Active scan dwell time (in ms) per channel.
+
+config WIFI_SCAN_DWELL_TIME_PASSIVE
+	int "Passive scan dwell time"
+	default 130
+	range 10 1000
+	help
+	  Passive scan dwell time (in ms) per channel.
+
+# Hidden options to select the scan type
+config WIFI_SCAN_TYPE_ACTIVE
+	bool
+
+config WIFI_SCAN_TYPE_PASSIVE
+	bool
+
+choice
+	prompt "Choose a WiFi Scan Profile"
+
+config WIFI_SCAN_PROFILE_DEFAULT
+	bool "Scan in all bands and channels"
+	help
+	  Enable this profile to do Wi-Fi scan in all supported bands and channels.
+
+config WIFI_SCAN_PROFILE_ACTIVE
+	bool "Active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to do active scan where allowed.
+
+config WIFI_SCAN_PROFILE_PASSIVE
+	bool "Passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to do passive scan on all channels.
+
+config WIFI_SCAN_PROFILE_2_4GHz_ACTIVE
+	bool "Scan in the 2.4 GHz band using active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to scan in the 2.4 GHz band using active scanning where allowed.
+
+config WIFI_SCAN_PROFILE_2_4GHz_PASSIVE
+	bool "Scan in the 2.4 GHz band using passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to scan in the 2.4 GHz band using passive scanning.
+
+config WIFI_SCAN_PROFILE_5GHz_ACTIVE
+	bool "Scan in the 5 GHz band using active scan"
+	select WIFI_SCAN_TYPE_ACTIVE
+	help
+	  Enable this profile to do active scan in the 5 GHz band.
+
+config WIFI_SCAN_PROFILE_5GHz_PASSIVE
+	bool "Scan in the 5 GHz band using passive scan"
+	select WIFI_SCAN_TYPE_PASSIVE
+	help
+	  Enable this profile to do passive scan in the 5 GHz band.
+
+config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_CHAN
+	bool "Scan only non-overlapping channels"
+	help
+	  Enable this profile to scan only non-overlapping channels (1, 6, 11)
+	  in the 2.4 GHz band.
+
+config WIFI_SCAN_PROFILE_5GHz_NON_DFS_CHAN
+	bool "Scan only non-DFS channels"
+	help
+	  Enable this profile to scan only non-DFS channels (36, 40, 44,
+	  48, 149, 153, 157, 161, 165) in the 5 GHz band.
+
+config WIFI_SCAN_PROFILE_2_4GHz_NON_OVERLAP_AND_5GHZ_NON_DFS_CHAN
+	bool "Scan only non-overlapping and non-DFS channels"
+	help
+	  Enable this profile to scan only non-overlapping and non-DFS channels
+	  (1, 6, 11) in the 2.4 GHz band and non-DFS channels
+	  (36, 40, 44, 48, 149, 153, 157, 161, 165) in the 5 GHz band.
+
+endchoice
+
+endmenu
+
+
+menu "Communication with MQTT broker"
+
+config MQTT_PUB_TOPIC
+    string "MQTT publish topic"
+    default "bracelet/prototype_pcb/data"
+    help
+      The topic the bracelet publishes all data to.
+
+config MQTT_SUB_TOPIC
+    string "MQTT subscribe topic"
+    default "bracelet/prototype_pcb/response"
+    help
+      The topic the bracelet listens on for server responses.
+
+config MQTT_CLIENT_ID
+    string "MQTT Client ID"
+    default "prototype_pcb"
+    help
+      Use a custom Client ID string. If not set, the client ID will be
+      generated automatically.
+
+config MQTT_BROKER_HOSTNAME
+    string "MQTT broker Azure Server"
+    default "20.251.201.46"
+    help
+      WARNING: Avoid static IPs for production. Use a domain name.
+
+config MQTT_BROKER_PORT
+    int "MQTT broker port"
+    default 1883
+    help
+      Standard TCP is 1883. Secure TLS/SSL is usually 8883.
+
+config MQTT_BOOTSTRAP_SECURITY_CODE
+    string "Bootstrap security code"
+    default "987654"
+    help
+      The security code sent in the first MQTT message after boot.
+      The server uses this to register the bracelet in its database.
+      The mobile app user must enter this exact code when pairing.
+
+endmenu
+
+menu "Fall Detection & Sensor Settings"
+
+config FALL_DETECT_G_THRESHOLD
+    int "High-G Threshold for Fall Detection"
+    default 25
+    help
+      The G-force threshold (in raw sensor units or m/s^2 depending on your app math) 
+      that triggers a suspected fall event from the Bosch BMI270.
+
+config FALL_DETECT_TIME_WINDOW_MS
+    int "Time window to confirm fall (ms)"
+    default 2000
+    help
+      How long to wait after a high-G impact to check the Barometer 
+      for a pressure/altitude drop.
+
+endmenu
+
+menu "Finite State Machine & Tracking Timers"
+
+config FSM_ACTIVE_TRACKING_TIMER_S
+    int "Active Tracking Timer (Seconds)"
+    default 180
+    help
+      When the user is moving > 50m, how frequently (in seconds) should 
+      the device scan Wi-Fi and send via LTE before checking the IMU again.
+
+
+endmenu
