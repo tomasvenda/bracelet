@@ -38,6 +38,7 @@ const struct nrf_modem_gnss_pvt_data_frame* comms_gnss_get_pvt(void);
 int comms_network_init(void);
 int comms_mqtt_ensure_connected(void);
 int comms_mqtt_publish(const char *payload);
+void comms_mqtt_disconnect(void);
 
 
 /* LTE Controls for Core */
