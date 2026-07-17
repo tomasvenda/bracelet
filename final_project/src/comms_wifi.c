@@ -4,6 +4,7 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/ethernet.h>
+#include <zephyr/drivers/regulator.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -147,6 +148,7 @@ const struct ap_data_t* comms_wifi_get_aps(void)
 
 void comms_wifi_init(void)
 {
+
     net_mgmt_init_event_callback(
         &wifi_cb,
         wifi_event_handler,

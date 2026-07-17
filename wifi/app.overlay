@@ -144,7 +144,7 @@
 
         bucken-gpios    = <&gpio0 17 GPIO_ACTIVE_HIGH>;
         iovdd-ctrl-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
-        iovdd-regulator = <&npm1300_ldsw1>;
+        // iovdd-regulator = <&npm1300_ldsw1>;
         host-irq-gpios  = <&gpio0 16 GPIO_ACTIVE_HIGH>;
 
         nordic_wlan0: wlan0 {

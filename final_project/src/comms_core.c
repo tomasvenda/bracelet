@@ -4,6 +4,7 @@
 #include <zephyr/zbus/zbus.h>
 #include <modem/modem_info.h>
 #include <nrf_modem_gnss.h>
+#include <zephyr/drivers/regulator.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,8 @@ K_SEM_DEFINE(loc_start_sem, 0, 1);
 static atomic_t loc_busy = ATOMIC_INIT(0);
 
 static const char *current_status = "ok";
+
+static const struct device *ldo1_dev = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo1));
 
 /* ------------------------------------------------------------------
  * JSON PAYLOAD HELPERS
@@ -109,6 +112,11 @@ static bool perform_localization_work(void)
 
     k_sleep(K_MSEC(1000));
 
+    /* Enable LDO1 before bringing up Wi-Fi */
+    if (device_is_ready(ldo1_dev)) {
+        regulator_enable(ldo1_dev);
+    }
+
     struct net_if *iface = net_if_get_wifi_sta();
     if (iface) net_if_up(iface);
 
@@ -117,6 +125,11 @@ static bool perform_localization_work(void)
 
     if (iface) net_if_down(iface);
     k_sleep(K_MSEC(500));
+
+    /* Disable LDO1 after bringing down Wi-Fi */
+    if (device_is_ready(ldo1_dev)) {
+        regulator_disable(ldo1_dev);
+    }
 
     comms_lte_wake();
 

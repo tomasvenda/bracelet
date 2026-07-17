@@ -144,19 +144,18 @@
         regulator-max-microvolt = <1800000>;
         regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
         active-discharge;
-        regulator-boot-on;
-        regulator-always-on;
+        //regulator-boot-on;
+        //regulator-always-on;
     };
 
         npm1300_ldo2: LDO2 {
         /* Set the voltage to 1.8V */
         regulator-min-microvolt = <1800000>;
         regulator-max-microvolt = <1800000>;
-        regulator-init-microvolt = <1800000>;        /* Force early power-on during boot */
         regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
         active-discharge;
         regulator-boot-on;
-        regulator-always-on;
+        //regulator-always-on;
     };
 };
 
@@ -178,7 +177,7 @@
 
         bucken-gpios    = <&gpio0 17 GPIO_ACTIVE_HIGH>;
         iovdd-ctrl-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
-        iovdd-regulator = <&npm1300_ldo1>;
+        // iovdd-regulator = <&npm1300_ldo1>;
         host-irq-gpios  = <&gpio0 16 GPIO_ACTIVE_HIGH>;
 
         nordic_wlan0: wlan0 {
