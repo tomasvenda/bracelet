@@ -1,3 +1,16 @@
+/*
+ * PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ 
+ * sensors.c -- Hardware driver layer: BMI270 IMU (legacy Bosch API over
+ * I2C) for fall/motion detection, ICP-20100 barometer, PWM-driven RGB LED
+ * and buzzer, emergency button (short/long press), and nPM1300 power supply
+ * 
+ * Publishes IMU/button events to the FSM over ZBUS and exposes the
+ * fall-window capture used for TinyML inference. 
+ 
+ */
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
@@ -37,9 +50,13 @@ static const struct gpio_dt_spec button  = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static const struct device *const pwm_dev = DEVICE_DT_GET(PWM_CTLR_NODE);
 static const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
 
-/* Used for battery measurements */
+/* NPM1300 - Used for battery measurements */
 #define NPM1300_CHARGER_NODE DT_NODELABEL(npm1300_charger)
 static const struct device *const charger_dev = DEVICE_DT_GET(NPM1300_CHARGER_NODE);
+
+/* Emergency button setup */
+#define LONG_PRESS_MS 1500
+static uint32_t press_start_time;
 
 /* ======================================================================
  * BMI270 / ICP-20100 REGISTERS & WINDOW GEOMETRY (from the logger)
@@ -92,7 +109,7 @@ BMI2_INTF_RETURN_TYPE bmi2_i2c_write(uint8_t reg_addr, const uint8_t *data, uint
 void bmi2_delay_us(uint32_t period, void *intf_ptr);
 
 /* ======================================================================
- * PWM: LED & BUZZER (unchanged from previous version)
+ * PWM: LED & BUZZER 
  * ====================================================================== */
 #define PWM_CH_RED     0U
 #define PWM_CH_GREEN   1U
@@ -196,18 +213,70 @@ void sensors_evaluation_done(void)
     atomic_clear(&capture_pending);
 }
 
-/* ======================================================================
- * ISRs -- fast paths only (no I2C allowed here)
- * ====================================================================== */
-static void button_pressed_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    static uint32_t last_press_time = 0;
-    uint32_t now = k_uptime_get_32();
-    if (now - last_press_time < 500) return;
-    last_press_time = now;
+/* Debouncing for the button --- 
+ * Needed because each press registers multiple events (press/release) due
+ * to imperfect contact.    
+*/
+#define DEBOUNCE_MS   50
+static struct k_work_delayable button_debounce_work;
+static bool button_was_pressed;   /* last confirmed stable state */
 
-    struct bracelet_event event = { .type = EVENT_BUTTON_PRESSED };
-    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+/* Emergency button setup */
+#define LONG_PRESS_MS 1500
+static uint32_t press_start_time;
+static bool long_press_fired;
+
+/* Fires exactly once, 1.5 seconds after a confirmed press begins,
+ * as long as the button is still held down at that moment. */
+static void long_press_timer_fn(struct k_timer *timer_id)
+{
+    if (button_was_pressed) {
+        struct bracelet_event event = { .type = EVENT_BUTTON_LONG_PRESS };
+        zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+        long_press_fired = true;
+    }
+}
+K_TIMER_DEFINE(long_press_timer, long_press_timer_fn, NULL);
+
+static void button_debounce_fn(struct k_work *work)
+{
+    bool pressed_now = gpio_pin_get_dt(&button) > 0;
+
+    if (pressed_now == button_was_pressed) {
+        gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
+        return;
+    }
+
+    if (pressed_now) {
+        press_start_time = k_uptime_get_32();
+        long_press_fired = false;
+        button_was_pressed = true;
+        k_timer_start(&long_press_timer, K_MSEC(LONG_PRESS_MS), K_NO_WAIT);
+    } else {
+        k_timer_stop(&long_press_timer);
+
+        if (!long_press_fired) {
+            /* Released before threshold -> genuine short press */
+            struct bracelet_event event = { .type = EVENT_BUTTON_PRESSED };
+            zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+        }
+        /* If long_press_fired, EVENT_BUTTON_LONG_PRESS was already published */
+        button_was_pressed = false;
+    }
+
+    gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
+}
+
+
+/* =================================================================
+ * ISRs -- fast paths only (no blocking calls of I2C allowed here)
+ * ================================================================= */
+static void button_pressed_isr(const struct device *dev,
+                                struct gpio_callback *cb, uint32_t pins)
+{
+    /* Mask further interrupts until we've confirmed the line settled */
+    gpio_pin_interrupt_configure_dt(&button, GPIO_INT_DISABLE);
+    k_work_reschedule(&button_debounce_work, K_MSEC(DEBOUNCE_MS));
 }
 
 static void bmi_isr(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins)
@@ -528,7 +597,8 @@ K_THREAD_DEFINE(sensor_tid, 2048, sensor_thread_fn, NULL, NULL, NULL,
                 K_PRIO_PREEMPT(6), 0, 0);
 
 /* ======================================================================
- * INITIALIZATION
+   INITIALIZATION
+   Called once from main.c 
  * ====================================================================== */
 int sensors_init(void)
 {
@@ -552,15 +622,18 @@ int sensors_init(void)
         return -ENODEV;
     }
 
-    /* -- Emergency button (unchanged) -- */
+    /* -- Emergency button -- */
     if (!gpio_is_ready_dt(&button)) {
         LOG_ERR("[SENSORS] Button GPIO not ready!");
         return -ENODEV;
     }
     gpio_pin_configure_dt(&button, GPIO_INPUT | GPIO_PULL_UP);
-    gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+    gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
     gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(button.pin));
     gpio_add_callback(button.port, &button_cb_data);
+
+    k_work_init_delayable(&button_debounce_work, button_debounce_fn);
+    
     LOG_INF("[SENSORS] Emergency button armed.");
 
     /* -- I2C bus -- */
@@ -631,8 +704,7 @@ int sensors_init(void)
     bmi270_legacy_set_sensor_config(&low_g_cfg, 1, &bmi_dev_ctx);
 
     /* ANY-MOTION: the light-motion / localization-wake trigger.
-     * threshold ~0.15 g, duration ~60 ms (matches old Zephyr-driver
-     * values; tune to taste). */
+     * threshold ~0.15 g, duration ~60 ms. */
     struct bmi2_sens_config any_mot_cfg = { .type = BMI2_ANY_MOTION };
     bmi270_legacy_get_sensor_config(&any_mot_cfg, 1, &bmi_dev_ctx);
     any_mot_cfg.cfg.any_motion.threshold = 0x136;  /* ~0.15 g (1LSB=0.49mg) */

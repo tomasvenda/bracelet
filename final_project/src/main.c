@@ -1,7 +1,12 @@
 /*
- * BRACELET TRACKER - MAIN ENTRY POINT
- */
-
+ 
+* PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ * main.c -- Application entry point. Initializes sensors and comms
+ * subsystems, then starts the FSM thread that drives the rest of the
+ * bracelet's runtime behavior. 
+ * 
+ * */
 #include <zephyr/kernel.h>
 #include <stdio.h>
 #include <zephyr/init.h>
@@ -23,7 +28,6 @@ int main(void)
     printf("========================================\n");
 
     /* 1. Initialize Hardware Sensors & Interrupts */
-    /* (Make sure you removed the ldo1_dev code from inside here!) */
     if (sensors_init() != 0) {
         printf("[FATAL] Sensor initialization failed! Check PMIC/I2C.\n");
         return -1;

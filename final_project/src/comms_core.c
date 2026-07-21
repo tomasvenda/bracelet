@@ -1,3 +1,13 @@
+/*
+* PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ 
+ * comms_core.c -- Localization orchestration and alert/status reporting.
+ * Runs the Wi-Fi -> GNSS -> LTE-cell fallback waterfall on its own thread,
+ * builds and publishes MQTT JSON payloads, and reports LOC_SUCCESS/
+ * LOC_FAILURE back to the FSM. Also owns comms_init() top-level bring-up. 
+ */
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_if.h>
@@ -97,6 +107,16 @@ static void send_lte_payload(int batt)
     comms_mqtt_publish(payload);
 }
 
+/* 
+    Function that starts a whole localization pipeline.
+    Attempts wi-fi scanning first and GNSS and LTE as fallbacks
+
+    Handles required modem activation and deactivation.
+
+    Returns true or false based on localization result.
+
+    USED as the core part of localization_thread_fn
+*/
 static bool perform_localization_work(void)
 {
     int batt = get_battery_level();
@@ -250,6 +270,7 @@ static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
 
 K_THREAD_DEFINE(loc_thread, 4096, localization_thread_fn, NULL, NULL, NULL, K_PRIO_PREEMPT(7), 0, 0);
 
+/* Initialization function, called in main.c */
 int comms_init(void)
 {
     comms_wifi_init();

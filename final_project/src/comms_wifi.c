@@ -1,3 +1,12 @@
+/*
+ * PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ 
+ *comms_wifi.c -- Wi-Fi AP scanning subsystem. Performs active dual-band
+ * scans, deduplicates and keeps the strongest MAC/RSSI pairs for the
+ * localization payload, and signals scan completion via a semaphore. 
+ * */
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_if.h>

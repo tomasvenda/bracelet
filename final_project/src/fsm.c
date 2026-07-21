@@ -1,3 +1,14 @@
+/*
+* PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ 
+ * fsm.c -- Central bracelet state machine (Zephyr SMF) driven over ZBUS.
+ * Owns DEEP_SLEEP / LOCATION_PING / ACTIVE_TRACKING / EVALUATION / ALERT
+ * states, all associated timers (tracking, cooldown, per-state watchdog,
+ * alert beep, alert cancel window), and the button/IMU event routing that
+ * decides which state transitions to trigger. 
+ */
+
 #include <zephyr/kernel.h>
 #include <zephyr/smf.h>
 #include <zephyr/zbus/zbus.h>
@@ -7,20 +18,18 @@
 #include "comms.h"
 #include "ml_wrapper.h"
 
-/* Define the ZBUS channel (Message size, subscribers, etc.) */
-ZBUS_CHAN_DEFINE(fsm_events_chan,       /* Name */
-                 struct bracelet_event, /* Payload type */
-                 NULL,                  /* Validator */
-                 NULL,                  /* User data */
-                 ZBUS_OBSERVERS(fsm_sub), /* Initial observers */
-                 ZBUS_MSG_INIT(0));     /* Initial value */
+/* Defining the ZBUS channel */
+ZBUS_CHAN_DEFINE(fsm_events_chan,           /* Name */
+                 struct bracelet_event,     /* Payload type */
+                 NULL,                      /* Validator */
+                 NULL,                      /* User data */
+                 ZBUS_OBSERVERS(fsm_sub),   /* Initial observers */
+                 ZBUS_MSG_INIT(0));         /* Initial value */
 
 /* Define the ZBUS subscriber for the FSM thread */
 ZBUS_MSG_SUBSCRIBER_DEFINE(fsm_sub);
 
-/*===========================*/
-/* Timer for active tracking */
-/*===========================*/
+/* 1 minute timer for active tracking */
 static void tracking_timer_expiry_cb(struct k_timer *timer_id);
 K_TIMER_DEFINE(tracking_timer, tracking_timer_expiry_cb, NULL);
 
@@ -29,9 +38,7 @@ static void tracking_timer_expiry_cb(struct k_timer *timer_id) {
     zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
 }
 
-/*===========================*/
-/* Timer for deep sleep      */
-/*===========================*/
+/* 10 minute timer for deep sleep */
 static void cooldown_timer_expiry_cb(struct k_timer *timer_id);
 K_TIMER_DEFINE(cooldown_timer, cooldown_timer_expiry_cb, NULL);
 
@@ -39,6 +46,13 @@ static void cooldown_timer_expiry_cb(struct k_timer *timer_id) {
     struct bracelet_event event = { .type = EVENT_TIMER_10MIN_EXPIRED };
     zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
 }
+
+/* Short timer used for the window in which the user can cancel an alert */
+static void alert_confirm_timer_cb(struct k_timer *timer_id) {
+    struct bracelet_event event = { .type = EVENT_ALERT_CANCEL_WINDOW_TIMEOUT };
+    zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
+}
+K_TIMER_DEFINE(alert_confirm_timer, alert_confirm_timer_cb, NULL);
 
 /*===========================*/
 /* Per-state watchdog timer  */
@@ -51,11 +65,6 @@ K_TIMER_DEFINE(state_timeout_timer, state_timeout_cb, NULL);
 
 /*===============================================================*/
 /* ALERT beep pattern: 200 ms ON / 1800 ms OFF.                  */
-/* A continuous buzzer + red LED + nRF7002 scan TX bursts        */
-/* browned out the board; pulsing removes the standing load and  */
-/* makes overlap with radio TX peaks unlikely.                   */
-/* Timer fires in ISR context, so the buzzer driver is driven    */
-/* from a work item instead.                                     */
 /*===============================================================*/
 static bool beep_is_on;
 static void beep_timer_cb(struct k_timer *timer_id);
@@ -74,10 +83,6 @@ static void beep_work_fn(struct k_work *work) {
 }
 K_WORK_DEFINE(alert_beep_work, beep_work_fn);
 
-/* Remaining cooldown time captured on exit, so a false-alarm
- * round-trip through EVALUATION can resume it instead of losing it. */
-static uint32_t cooldown_remaining_ms;
-
 static void beep_timer_cb(struct k_timer *timer_id) {
     k_work_submit(&alert_beep_work);
 }
@@ -92,6 +97,10 @@ static void alert_beep_stop(void) {
     sensors_buzzer_off();
     beep_is_on = false;
 }
+
+/* Remaining cooldown time */
+/* Captured on exit from deep sleep so it can be resumed after evaluation finishes */
+static uint32_t cooldown_remaining_ms;
 
 /* Forward declaration of the state table */
 static const struct smf_state states[];
@@ -112,7 +121,7 @@ struct fsm_context {
     struct bracelet_event current_event;
 } fsm;
 
-/* Why we are entering ALERT: set by the button override or by a
+/* Reason for entering ALERT: set by the button override or by a
  * confirmed ML fall, consumed by alert_entry(). */
 static enum alert_reason pending_alert_reason = REASON_BUTTON_PRESSED;
 
@@ -138,10 +147,7 @@ static void deep_sleep_entry(void *o) {
         is_first_run = false;
     } 
     else if (fsm.previous_state == STATE_EVALUATION) {
-        /* Restore exactly what was true before the impact interrupted us:
-         * if the 10-min cooldown was still pending, resume it with the
-         * remaining time (trigger stays disarmed); if it had already
-         * expired, the motion trigger was armed, so re-arm it. */
+        /* Restore exactly what was true before the impact interrupted the state */
         if (cooldown_remaining_ms > 0) {
             printf("[DEEP SLEEP] False alarm. Resuming cooldown (%u s left).\n",
                    cooldown_remaining_ms / 1000U);
@@ -160,8 +166,6 @@ static void deep_sleep_entry(void *o) {
 
     fsm.previous_state = STATE_DEEP_SLEEP;
 }
-
-
 
 static void deep_sleep_exit(void *o) {
     cooldown_remaining_ms = k_timer_remaining_get(&cooldown_timer);
@@ -218,16 +222,12 @@ static enum smf_state_result location_ping_run(void *o) {
 
     if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
-    }
-    else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
+    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
-    }
-    else if (fsm.current_event.type == EVENT_LOC_FAILURE) {
-        printf("[LOCATION PING] Localization finished with no verdict. "
-               "Failing safe -> ACTIVE_TRACKING.\n");
+    } else if (fsm.current_event.type == EVENT_LOC_FAILURE) {
+        printf("[LOCATION PING] No server verdict in time. Failing safe -> ACTIVE_TRACKING.\n");
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
-    }
-    else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
+    } else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
         if (!loc_ping_started && loc_ping_retries < LOC_PING_MAX_RETRIES) {
             loc_ping_retries++;
             location_ping_try_start();
@@ -365,21 +365,20 @@ static enum smf_state_result evaluation_run(void *o) {
 /* Leaving ALERT requires BOTH: server acked the panic message AND the
  * alert localization stack ran to completion. Order can be either. */
 static bool alert_acked;
+static bool alert_pending_confirm;
 
 static void alert_entry(void *o) {
-    printf("[STATE] Entered ALERT! Blasting status payload...\n");
+    printf("[STATE] Entered ALERT! 10s cancel window open...\n");
     alert_acked = false;
+    alert_pending_confirm = true;
 
-    /* 1. Hardware indications */
+    /* Hardware indications */
     sensors_led_off(LED_BLUE);
     sensors_led_on(LED_RED);
     alert_beep_start(); 
 
-    /* 2. Send the status immediately */
-    comms_send_alert_status(pending_alert_reason);
-
-    /* 3. Re-send the alert status every 60 s until the server ACKs */
-    k_timer_start(&state_timeout_timer, K_SECONDS(60), K_SECONDS(60));
+    /* 10 seconds to cancel the alert */
+    k_timer_start(&alert_confirm_timer, K_SECONDS(10), K_NO_WAIT);
 }
 
 static void alert_exit(void *o) {
@@ -389,6 +388,24 @@ static void alert_exit(void *o) {
 }
 
 static enum smf_state_result alert_run(void *o) {
+    if (alert_pending_confirm) {
+        if (fsm.current_event.type == EVENT_BUTTON_LONG_PRESS) {
+            printf("[ALERT] Cancelled by user long-press.\n");
+            k_timer_stop(&alert_confirm_timer);
+            alert_beep_stop();
+            sensors_led_off(LED_RED);
+            enum state_names origin = fsm.previous_state;
+            smf_set_state(SMF_CTX(&fsm), &states[origin]);
+            return SMF_EVENT_HANDLED;
+        }
+        if (fsm.current_event.type == EVENT_ALERT_CANCEL_WINDOW_TIMEOUT) {
+            printf("[ALERT] No cancel received. Proceeding with alert pipeline.\n");
+            alert_pending_confirm = false;
+            comms_send_alert_status(pending_alert_reason);
+            k_timer_start(&state_timeout_timer, K_SECONDS(60), K_SECONDS(60));
+        }
+        return SMF_EVENT_HANDLED; /* swallow everything else while pending */
+    }
     
     if (fsm.current_event.type == EVENT_SERVER_ACK_ALERT) {
         if (!alert_acked) {
@@ -440,8 +457,6 @@ static enum smf_state_result alert_run(void *o) {
     return SMF_EVENT_HANDLED;
 }
 
-
-
 /* ======================================================================
  * STATE TABLE MAPPING
  * ====================================================================== */
@@ -465,18 +480,7 @@ void fsm_thread_main(void)
     while (1) {
         if (zbus_sub_wait_msg(&fsm_sub, &chan, &fsm.current_event, K_FOREVER) == 0) {
 
-            /* NO zbus_chan_read() here -- and delete it if present.
-             * wait_msg has ALREADY delivered the queued message into
-             * fsm.current_event. A chan_read would overwrite it with
-             * the channel's LATEST value, so two rapid events (e.g.
-             * BUTTON right after LIGHT_MOTION) would process the
-             * newest twice and silently drop the older one. */
-
             if (fsm.current_event.type == EVENT_BUTTON_PRESSED) {
-                /* Already in ALERT: ignore repeat presses. Re-entering
-                 * would reset the acked/stack-done flags, restart the
-                 * beeper, and queue a redundant waterfall. One alert
-                 * at a time; it ends via ack + stack completion. */
                 if (SMF_CTX(&fsm)->current == &states[STATE_ALERT]) {
                     printf("[FSM] Button ignored: already in ALERT.\n");
                     continue;

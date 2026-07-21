@@ -1,6 +1,6 @@
 /* sensors.h -- sensor subsystem public API.
  *
- * CHANGED vs. old version: the BMI270 is now driven through the Bosch
+ * The BMI270 is now driven through the Bosch
  * legacy API (raw I2C), NOT the Zephyr sensor driver. This is required
  * because the model needs the low-g feature (harsh-impact trigger) and
  * the hardware FIFO (the 1.5 s of PRE-impact data the model was
@@ -9,6 +9,7 @@
  * sensors_capture_fall_window(), which reproduces the training-data
  * pipeline exactly.
  */
+
 #ifndef SENSORS_H
 #define SENSORS_H
 
@@ -22,8 +23,8 @@
 
 int  sensors_init(void);
 
-/* Light-motion (any-motion) trigger control -- used by the FSM to
- * gate wake-ups during cooldown. The low-g harsh-impact trigger is
+/* Light-motion (any-motion) trigger control -- used by the FSM wake 
+ * up during DEEP_SLEEP. The low-g harsh-impact trigger is
  * NOT affected by these: fall detection stays armed at all times. */
 void sensors_enable_motion_trigger(void);
 void sensors_disable_motion_trigger(void);
@@ -37,14 +38,24 @@ void sensors_disable_motion_trigger(void);
  * Rearms the low-g trigger before returning. */
 int  sensors_capture_fall_window(float *features, size_t count);
 
-/* LED & buzzer (PWM, unchanged) */
+/* LED & buzzer */
+/* Turns on one or more LED colors (LED_RED/GREEN/BLUE). */
 void sensors_led_on(uint8_t color);
+
+/* Turns off one or more LED colors. */
 void sensors_led_off(uint8_t color);
+
+/* Turns the buzzer PWM output off or on at fixed duty cycle. */
 void sensors_buzzer_on(void);
 void sensors_buzzer_off(void);
+
+/* Clears the capture-pending flag, re-enabling harsh-impact interrupt
+ * handling. Must be called after a fall-window capture + ML inference
+ * cycle completes, regardless of outcome. */
 void sensors_evaluation_done(void);
 
-/*Battery approx percentage function*/
+/* Reads battery voltage from the nPM1300 charger/gauge and converts it
+ * to an approximate percentage by preset values in a voltage lookup table. */
 int get_battery_level(void);
 
 #endif /* SENSORS_H */

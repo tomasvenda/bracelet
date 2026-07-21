@@ -1,3 +1,13 @@
+/*
+* PART OF MASTER'S THESIS: Design of an End-to-End IoT System for Monitoring Vulnerable Users 
+ 
+ * comms_network.c -- LTE modem connection management and MQTT client
+ * (connect/publish/subscribe/disconnect), including registration-denied
+ * backoff handling and translation of incoming MQTT messages into FSM
+ * ZBUS events (Wi-Fi verdicts, home/away, alert ACK). 
+ 
+ */
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
