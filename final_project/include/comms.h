@@ -2,11 +2,14 @@
 #define COMMS_H
 
 #include <stdint.h>
+#include <stddef.h> 
 #include <zephyr/sys/util.h>
 
 #define WIFI_EVT_SUCCESS BIT(0)
 #define WIFI_EVT_FAIL    BIT(1)
-#define LOC_EVT_VERDICT  BIT(2)
+#define LOC_EVT_HOME     BIT(3)
+#define LOC_EVT_AWAY     BIT(4)
+#define LOC_EVT_VERDICT  (LOC_EVT_HOME | LOC_EVT_AWAY)
 
 extern struct k_event app_events;
 
@@ -32,7 +35,15 @@ const struct ap_data_t* comms_wifi_get_aps(void);
 /* GNSS Subsystem Prototypes */
 int comms_gnss_init(void);
 int do_gnss_fix(void);
+int do_gnss_fix_timeout(int timeout_s);
 const struct nrf_modem_gnss_pvt_data_frame* comms_gnss_get_pvt(void);
+
+/* A-GNSS*/
+typedef void (*comms_raw_cb_t)(const uint8_t *data, size_t len);
+void comms_set_raw_response_cb(comms_raw_cb_t cb);
+int  comms_agnss_refresh_if_needed(void);
+void comms_agnss_invalidate(void);
+
 
 /* Network (LTE & MQTT) */
 int comms_network_init(void);
@@ -51,7 +62,7 @@ void comms_safe_disconnect(void);
 /* Core APIs (Used by fsm.c) */
 int comms_init(void);
 void comms_send_alert_status(enum alert_reason reason);
-void comms_update_localization(void);
+int comms_update_localization(void);
 void comms_clear_alert(void);
 
 

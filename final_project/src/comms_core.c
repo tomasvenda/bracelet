@@ -142,8 +142,19 @@ static bool perform_localization_work(void)
 
         if (events & WIFI_EVT_SUCCESS) {
             LOG_INF("Server confirmed Wi-Fi. Waiting for Home/Away verdict...");
+
             events = k_event_wait(&app_events, LOC_EVT_VERDICT, false, K_SECONDS(10));
-            return (events & LOC_EVT_VERDICT) ? true : false;
+
+            if (events & LOC_EVT_HOME) {
+                LOG_INF("Server verdict (Wi-Fi): HOME -- inside geofence.");
+                return true;
+            } else if (events & LOC_EVT_AWAY) {
+                LOG_INF("Server verdict (Wi-Fi): AWAY -- outside geofence.");
+                return true;
+            } else {
+                LOG_WRN("Server verdict timeout after Wi-Fi success (10 s).");
+                return false;
+            }
         } else if (events & WIFI_EVT_FAIL) {
             LOG_INF("Server failed to locate Wi-Fi APs. Moving to GNSS.");
         } else {
@@ -155,8 +166,17 @@ static bool perform_localization_work(void)
 
     /* STEP 2: GNSS FALLBACK */
     LOG_INF("Attempting GNSS Localization.");
+    bool assisted = false;
+    if (comms_mqtt_ensure_connected() == 0) {
+        assisted = (comms_agnss_refresh_if_needed() == 0);
+        LOG_INF("A-GNSS assistance: %s", assisted ? "OK" : "unavailable");
+    }
+    comms_mqtt_disconnect();
     comms_lte_gnss_mode();
-    int gnss_res = do_gnss_fix();
+    int gnss_res = do_gnss_fix_timeout(assisted ? 45 : 120);
+    if (gnss_res != 0 && assisted) {
+        comms_agnss_invalidate();   /* force a refetch next cycle */
+    }
     comms_lte_normal_mode();
 
     k_event_clear(&app_events, LOC_EVT_VERDICT);
@@ -171,8 +191,13 @@ static bool perform_localization_work(void)
 
     events = k_event_wait(&app_events, LOC_EVT_VERDICT, false, K_SECONDS(10));
 
-    if (events & LOC_EVT_VERDICT) {
-        LOG_INF("Final Server verdict received.");
+    if (events & LOC_EVT_HOME) {
+        LOG_INF("Server verdict (%s): HOME -- inside geofence.",
+                gnss_res == 0 ? "GNSS" : "LTE cell-ID");
+        return true;
+    } else if (events & LOC_EVT_AWAY) {
+        LOG_INF("Server verdict (%s): AWAY -- outside geofence.",
+                gnss_res == 0 ? "GNSS" : "LTE cell-ID");
         return true;
     } else {
         LOG_WRN("No server verdict received within 10s timeout.");
@@ -192,10 +217,14 @@ void comms_send_alert_status(enum alert_reason reason)
 }
 
 /* Routine localization trigger */
-void comms_update_localization(void)
+int comms_update_localization(void)
 {
-    if (atomic_get(&loc_busy)) return;
-    k_sem_give(&loc_start_sem); 
+    if (!atomic_cas(&loc_busy, 0, 1)) {
+        LOG_WRN("Localization already in flight -- request rejected");
+        return -EBUSY;
+    }
+    k_sem_give(&loc_start_sem);
+    return 0;
 }
 
 /* Clear the alert status when exiting the emergency */
@@ -207,7 +236,6 @@ static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
 {
     while (1) {
         k_sem_take(&loc_start_sem, K_FOREVER);
-        atomic_set(&loc_busy, 1);
         
         bool success = perform_localization_work();
         

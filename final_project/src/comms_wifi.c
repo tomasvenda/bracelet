@@ -22,6 +22,7 @@ static struct net_mgmt_event_callback wifi_cb;
 
 static K_SEM_DEFINE(wifi_scan_sem, 0, 1);
 
+static const struct device *const ldo1_dev = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo1));
 
 static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event, struct net_if *iface)
 {
@@ -148,12 +149,47 @@ const struct ap_data_t* comms_wifi_get_aps(void)
 
 void comms_wifi_init(void)
 {
-
     net_mgmt_init_event_callback(
         &wifi_cb,
         wifi_event_handler,
         NET_EVENT_WIFI_SCAN_RESULT |
         NET_EVENT_WIFI_SCAN_DONE);
-    
+
     net_mgmt_add_event_callback(&wifi_cb);
+
+    /* Bring the Wi-Fi rail and interface up, then straight back down. */
+    if (device_is_ready(ldo1_dev)) {
+        int ret = regulator_enable(ldo1_dev);
+        if (ret) {
+            LOG_ERR("LDO1 enable failed: %d", ret);
+        } else {
+            LOG_INF("LDO1 enabled.");
+        }
+    } else {
+        LOG_ERR("LDO1 not ready!");
+    }
+
+    k_msleep(10);
+
+    struct net_if *iface = net_if_get_wifi_sta();
+    if (iface) {
+        int ret = net_if_up(iface);
+        LOG_INF("Wi-Fi interface up (%d).", ret);
+        k_msleep(500);
+
+        ret = net_if_down(iface);
+        LOG_INF("Wi-Fi interface down (%d).", ret);
+        k_msleep(100);
+    } else {
+        LOG_ERR("Wi-Fi interface not found!");
+    }
+
+    if (device_is_ready(ldo1_dev)) {
+        int ret = regulator_disable(ldo1_dev);
+        if (ret) {
+            LOG_ERR("LDO1 disable failed: %d", ret);
+        } else {
+            LOG_INF("LDO1 disabled.");
+        }
+    }
 }

@@ -35,6 +35,7 @@ static const struct i2c_dt_spec icp_i2c = I2C_DT_SPEC_GET(ICP201XX_NODE);
 static const struct gpio_dt_spec bmi_int = GPIO_DT_SPEC_GET(BMI270_NODE, irq_gpios);
 static const struct gpio_dt_spec button  = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 static const struct device *const pwm_dev = DEVICE_DT_GET(PWM_CTLR_NODE);
+static const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
 
 /* Used for battery measurements */
 #define NPM1300_CHARGER_NODE DT_NODELABEL(npm1300_charger)
@@ -101,18 +102,83 @@ void bmi2_delay_us(uint32_t period, void *intf_ptr);
 #define PWM_LED_PULSE       (PWM_UNIFIED_PERIOD / 2U)
 #define PWM_BUZZ_PULSE      (PWM_UNIFIED_PERIOD / 2U)
 
+/* Time for the LDO1 rail to settle before driving the LEDs. */
+#define LED_RAIL_SETTLE_MS  2
+
+static uint8_t led_active_mask;
+static K_MUTEX_DEFINE(led_lock);
+
+
+static void led_set_channel(uint8_t color, uint32_t pulse)
+{
+    if (color & LED_RED)   pwm_set(pwm_dev, PWM_CH_RED,   PWM_UNIFIED_PERIOD, pulse, PWM_POLARITY_NORMAL);
+    if (color & LED_GREEN) pwm_set(pwm_dev, PWM_CH_GREEN, PWM_UNIFIED_PERIOD, pulse, PWM_POLARITY_NORMAL);
+    if (color & LED_BLUE)  pwm_set(pwm_dev, PWM_CH_BLUE,  PWM_UNIFIED_PERIOD, pulse, PWM_POLARITY_NORMAL);
+}
+
+
 void sensors_led_on(uint8_t color)
 {
-    if (color & LED_RED)   pwm_set(pwm_dev, PWM_CH_RED,   PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
-    if (color & LED_GREEN) pwm_set(pwm_dev, PWM_CH_GREEN, PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
-    if (color & LED_BLUE)  pwm_set(pwm_dev, PWM_CH_BLUE,  PWM_UNIFIED_PERIOD, PWM_LED_PULSE, PWM_POLARITY_NORMAL);
+    color &= (LED_RED | LED_GREEN | LED_BLUE);
+    if (color == 0U) {
+        return;
+    }
+
+    k_mutex_lock(&led_lock, K_FOREVER);
+
+    /* Rail comes up only on the 0 -> non-zero edge. */
+    if (led_active_mask == 0U) {
+        if (!device_is_ready(ldo1_dev)) {
+            LOG_ERR("[LED] LDO1 not ready -- cannot power LED rail");
+            k_mutex_unlock(&led_lock);
+            return;
+        }
+
+        int ret = regulator_enable(ldo1_dev);
+        if (ret != 0) {
+            LOG_ERR("[LED] regulator_enable(LDO1) failed: %d", ret);
+            k_mutex_unlock(&led_lock);
+            return;
+        }
+
+        k_msleep(LED_RAIL_SETTLE_MS);
+    }
+
+    led_active_mask |= color;
+    led_set_channel(color, PWM_LED_PULSE);
+
+    k_mutex_unlock(&led_lock);
 }
 
 void sensors_led_off(uint8_t color)
 {
-    if (color & LED_RED)   pwm_set(pwm_dev, PWM_CH_RED,   PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
-    if (color & LED_GREEN) pwm_set(pwm_dev, PWM_CH_GREEN, PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
-    if (color & LED_BLUE)  pwm_set(pwm_dev, PWM_CH_BLUE,  PWM_UNIFIED_PERIOD, 0U, PWM_POLARITY_NORMAL);
+    color &= (LED_RED | LED_GREEN | LED_BLUE);
+    if (color == 0U) {
+        return;
+    }
+
+    k_mutex_lock(&led_lock, K_FOREVER);
+
+    /* Only act on colours we actually believe are lit. */
+    uint8_t turning_off = color & led_active_mask;
+    if (turning_off == 0U) {
+        k_mutex_unlock(&led_lock);
+        return;
+    }
+
+    led_set_channel(turning_off, 0U);
+    led_active_mask &= ~turning_off;
+
+    if (led_active_mask == 0U) {
+        int ret = regulator_disable(ldo1_dev);
+        if (ret != 0) {
+            LOG_ERR("[LED] regulator_disable(LDO1) failed: %d", ret);
+        } else {
+            LOG_DBG("[LED] LDO1 rail down");
+        }
+    }
+
+    k_mutex_unlock(&led_lock);
 }
 
 void sensors_buzzer_on(void)
@@ -471,20 +537,14 @@ int sensors_init(void)
 
     LOG_INF("[SENSORS] Initializing hardware...");
 
-    // /* -- LDO1 -> buck converter enable (unchanged) -- */
-    // const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
-    // if (!device_is_ready(ldo1_dev)) {
-    //     LOG_ERR("[SENSORS] LDO1 not ready!");
-    //     return -ENODEV;
-    // }
-    // ret = regulator_set_voltage(ldo1_dev, 1800000, 1800000);
-    // if (ret == 0) {
-    //     regulator_enable(ldo1_dev);
-    //     LOG_INF("[SENSORS] LDO1 ON -- buck converter active.");
-    // } else {
-    //     LOG_ERR("[SENSORS] Failed to set LDO1 voltage: %d", ret);
-    //     return ret;
-    // }
+    if (!device_is_ready(ldo1_dev)) {
+        LOG_ERR("[SENSORS] LDO1 regulator not ready!");
+        return -ENODEV;
+    }
+    regulator_disable(ldo1_dev);
+    regulator_disable(ldo1_dev);
+    regulator_disable(ldo1_dev);
+    led_active_mask = 0U;
 
     /* -- PWM -- */
     if (!device_is_ready(pwm_dev)) {

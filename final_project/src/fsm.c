@@ -7,7 +7,6 @@
 #include "comms.h"
 #include "ml_wrapper.h"
 
-
 /* Define the ZBUS channel (Message size, subscribers, etc.) */
 ZBUS_CHAN_DEFINE(fsm_events_chan,       /* Name */
                  struct bracelet_event, /* Payload type */
@@ -181,17 +180,33 @@ static enum smf_state_result deep_sleep_run(void *o) {
 }
 
 // --- LOCATION PING ---
+#define LOC_PING_MAX_RETRIES 4
+static uint8_t loc_ping_retries;
+static bool    loc_ping_started;
+
+static void location_ping_try_start(void) {
+    if (comms_update_localization() == 0) {
+        loc_ping_started = true;
+        /* Never wait forever for the server verdict */
+        k_timer_start(&state_timeout_timer, K_SECONDS(270), K_NO_WAIT);
+    } else {
+        loc_ping_started = false;
+        printf("[LOCATION PING] Localization busy; retrying in 15 s (%u/%u).\n",
+               loc_ping_retries + 1U, LOC_PING_MAX_RETRIES);
+        k_timer_start(&state_timeout_timer, K_SECONDS(15), K_NO_WAIT);
+    }
+}
+
 static void location_ping_entry(void *o) {
     printf("[STATE] Entered LOCATION_PING. Updating location...\n");
     fsm.previous_state = STATE_LOCATION_PING;
 
-    /* LIGHT MOTION TRIGGERED: Turn on Blue LED while the network works */
     sensors_led_on(LED_BLUE);
 
     sensors_disable_motion_trigger();
-    comms_update_localization();
-    /* Never wait forever for the server verdict */
-    k_timer_start(&state_timeout_timer, K_SECONDS(270), K_NO_WAIT);
+
+    loc_ping_retries = 0;
+    location_ping_try_start();
 }
 
 static void location_ping_exit(void *o) {
@@ -199,15 +214,28 @@ static void location_ping_exit(void *o) {
 }
 
 static enum smf_state_result location_ping_run(void *o) {
-    printf("[STATE] location_ping_run");
+    printf("[STATE] location_ping_run\n");
 
     if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
-    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
+    }
+    else if (fsm.current_event.type == EVENT_SERVER_REPLY_AWAY) {
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
-    } else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
-        printf("[LOCATION PING] No server verdict in time. Failing safe -> ACTIVE_TRACKING.\n");
+    }
+    else if (fsm.current_event.type == EVENT_LOC_FAILURE) {
+        printf("[LOCATION PING] Localization finished with no verdict. "
+               "Failing safe -> ACTIVE_TRACKING.\n");
         smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
+    }
+    else if (fsm.current_event.type == EVENT_STATE_TIMEOUT) {
+        if (!loc_ping_started && loc_ping_retries < LOC_PING_MAX_RETRIES) {
+            loc_ping_retries++;
+            location_ping_try_start();
+        } else {
+            printf("[LOCATION PING] No server verdict in time. "
+                   "Failing safe -> ACTIVE_TRACKING.\n");
+            smf_set_state(SMF_CTX(&fsm), &states[STATE_ACTIVE_TRACKING]);
+        }
     }
 
     return SMF_EVENT_HANDLED;
@@ -217,9 +245,8 @@ static enum smf_state_result location_ping_run(void *o) {
 static void active_tracking_entry(void *o) {
     printf("[STATE] Entered ACTIVE_TRACKING. High alert tracking.\n");
     fsm.previous_state = STATE_ACTIVE_TRACKING;
-    /* HYGIENE: Ensure Blue LED turns off when entering tracking */
     sensors_led_off(LED_BLUE);
-    k_timer_start(&tracking_timer, K_MINUTES(1), K_MINUTES(1));
+    k_timer_start(&tracking_timer, K_MINUTES(3), K_NO_WAIT);   /* one-shot */
 }
 
 static void active_tracking_exit(void *o) {
@@ -228,15 +255,30 @@ static void active_tracking_exit(void *o) {
 }
 
 static enum smf_state_result active_tracking_run(void *o) {
-    if (fsm.current_event.type == EVENT_TIMER_1MIN_EXPIRED) {
-        printf("[ACTIVE TRACKING] 1 Min Timer Expired. Updating location...\n");
-        comms_update_localization();
-    } else if (fsm.current_event.type == EVENT_SERVER_REPLY_HOME) {
-        smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
-    }
+    switch (fsm.current_event.type) {
+    case EVENT_TIMER_1MIN_EXPIRED:
+        printf("[ACTIVE TRACKING] Timer expired. Updating location...\n");
+        if (comms_update_localization() != 0) {
+            printf("[ACTIVE TRACKING] Localization busy; retry in 15 s.\n");
+            k_timer_start(&tracking_timer, K_SECONDS(15), K_NO_WAIT);
+        }
+        break;
 
+    case EVENT_LOC_SUCCESS:
+    case EVENT_LOC_FAILURE:
+        k_timer_start(&tracking_timer, K_MINUTES(3), K_NO_WAIT);
+        break;
+    
+    case EVENT_SERVER_REPLY_HOME:
+        smf_set_state(SMF_CTX(&fsm), &states[STATE_DEEP_SLEEP]);
+        break;
+
+    default:
+        break;
+    }
     return SMF_EVENT_HANDLED;
 }
+
 
 /* ======================================================================
  * EVALUATION: capture the 3s fall window and run the TinyML model.
@@ -353,11 +395,15 @@ static enum smf_state_result alert_run(void *o) {
             printf("[ALERT] Server ACK received! Stopping buzzer & starting localization...\n");
             alert_acked = true;
             alert_beep_stop();
-            k_timer_stop(&state_timeout_timer);
-            
-            comms_clear_alert(); 
-            
-            comms_update_localization();
+            comms_clear_alert();
+
+            if (comms_update_localization() != 0) {
+                printf("[ALERT] Localization busy; retrying in 15 s.\n");
+                k_timer_start(&state_timeout_timer, K_SECONDS(15), K_NO_WAIT);
+            } else {
+                /* Watchdog -- the loc thread must answer inside this. */
+                k_timer_start(&state_timeout_timer, K_MINUTES(5), K_NO_WAIT);
+            }
         }
     }
     
@@ -381,6 +427,13 @@ static enum smf_state_result alert_run(void *o) {
         if (!alert_acked) {
             printf("[ALERT] No server ACK yet. Re-sending alert status.\n");
             comms_send_alert_status(pending_alert_reason);
+        } else {
+            printf("[ALERT] Retrying localization.\n");
+            if (comms_update_localization() != 0) {
+                k_timer_start(&state_timeout_timer, K_SECONDS(15), K_NO_WAIT);
+            } else {
+                k_timer_start(&state_timeout_timer, K_MINUTES(5), K_NO_WAIT);
+            }
         }
     }
 

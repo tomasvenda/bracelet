@@ -48,23 +48,21 @@ static void gnss_event_handler(int event)
 }
 
 
-int do_gnss_fix(void)
+int do_gnss_fix_timeout(int timeout_s)
 {
     gnss_has_fix = false;
-    k_sem_reset(&gnss_fix_sem); 
+    k_sem_reset(&gnss_fix_sem);
 
-    nrf_modem_gnss_fix_interval_set(0);    /* Single fix mode */
-    nrf_modem_gnss_fix_retry_set(10);     /* 10s hardware timeout */
+    nrf_modem_gnss_fix_interval_set(0);
+    nrf_modem_gnss_fix_retry_set(timeout_s);
     nrf_modem_gnss_start();
 
-    LOG_INF("Searching for GNSS satellites (up to 3 minutes)...");
-    
-    int res = k_sem_take(&gnss_fix_sem, K_SECONDS(10));
-    
+    int res = k_sem_take(&gnss_fix_sem, K_SECONDS(timeout_s + 5));
     nrf_modem_gnss_stop();
-
     return (res == 0 && gnss_has_fix) ? 0 : -ETIMEDOUT;
 }
+
+int do_gnss_fix(void) { return do_gnss_fix_timeout(60); }
 
 
 const struct nrf_modem_gnss_pvt_data_frame* comms_gnss_get_pvt(void)
@@ -99,25 +97,3 @@ int comms_gnss_init(void)
 
     return 0;
 }
-
-
-/*  Add this before and after GNSS
-
-if (mqtt_is_connected) {
-        mqtt_helper_disconnect();
-        k_msleep(300);
-        mqtt_is_connected = false;
-    }
-
-    //before 
-    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
-    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_GNSS);
-
-    //after
-
-    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_GNSS);
-    // Restore LTE so the payload can be published afterwards.
-    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_ACTIVATE_LTE);
-
-
-*/

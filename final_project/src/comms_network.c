@@ -24,6 +24,7 @@ LOG_MODULE_REGISTER(comms_network, LOG_LEVEL_INF);
 #define MQTT_TOPIC "bracelet/prototype_pcb/data"
 #define CLIENT_ID "prototype_pcb"
 #define MQTT_SUB_TOPIC "bracelet/prototype_pcb/response"
+#define MQTT_AGNSS_TOPIC "bracelet/prototype_pcb/agnss"
 
 #ifndef CONFIG_MQTT_BROKER_HOSTNAME
 #define CONFIG_MQTT_BROKER_HOSTNAME "20.251.201.46"
@@ -41,19 +42,22 @@ static bool mqtt_is_connected = false;
 static bool in_backoff;
 static void lte_backoff_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(lte_backoff_work, lte_backoff_fn);
+static volatile comms_raw_cb_t raw_cb;  
 
-static struct mqtt_topic sub_topic = {
-    .topic = {
-        .utf8 = (uint8_t *)MQTT_SUB_TOPIC,
-        .size = sizeof(MQTT_SUB_TOPIC) - 1,
-    },
-    .qos = MQTT_QOS_1_AT_LEAST_ONCE,
+
+static struct mqtt_topic sub_topics[] = {
+    { .topic = { .utf8 = (uint8_t *)MQTT_SUB_TOPIC,
+                 .size = sizeof(MQTT_SUB_TOPIC) - 1 },
+      .qos = MQTT_QOS_1_AT_LEAST_ONCE },
+    { .topic = { .utf8 = (uint8_t *)MQTT_AGNSS_TOPIC,
+                 .size = sizeof(MQTT_AGNSS_TOPIC) - 1 },
+      .qos = MQTT_QOS_1_AT_LEAST_ONCE },
 };
 
 static struct mqtt_subscription_list sub_list = {
-    .list = &sub_topic,
-    .list_count = 1,
-    .message_id = 1234
+    .list = sub_topics,
+    .list_count = ARRAY_SIZE(sub_topics),
+    .message_id = 1234,
 };
 
 static K_SEM_DEFINE(lte_connected, 0, 1);
@@ -95,6 +99,8 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 /* ------------------------------------------------------------------
  * MQTT CALLBACKS
  * ------------------------------------------------------------------ */
+void comms_set_raw_response_cb(comms_raw_cb_t cb) { raw_cb = cb; }
+
 static void on_mqtt_connack(enum mqtt_conn_return_code return_code, bool session_present)
 {
     if (return_code == MQTT_CONNECTION_ACCEPTED) {
@@ -114,8 +120,18 @@ static void on_mqtt_disconnect(int result)
 
 static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf payload)
 {
+    
+    if (topic.size == sizeof(MQTT_AGNSS_TOPIC) - 1 &&
+        memcmp(topic.ptr, MQTT_AGNSS_TOPIC, topic.size) == 0) {
+        if (raw_cb) {
+            raw_cb(payload.ptr, payload.size);
+        }
+        return;
+    }
+    
     char buf[64] = {0};
     size_t len = MIN((size_t)payload.size, sizeof(buf) - 1);
+
     memcpy(buf, payload.ptr, len);
 
     if (strcmp(buf, "wifi_successful") == 0) {
@@ -131,13 +147,14 @@ static void on_mqtt_publish(struct mqtt_helper_buf topic, struct mqtt_helper_buf
     if (strstr(buf, "located_home")) {
         event.type = EVENT_SERVER_REPLY_HOME;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
-        k_event_post(&app_events, LOC_EVT_VERDICT);
+        k_event_post(&app_events, LOC_EVT_HOME);
     } 
     else if (strstr(buf, "located_away")) {
         event.type = EVENT_SERVER_REPLY_AWAY;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
-        k_event_post(&app_events, LOC_EVT_VERDICT);
+        k_event_post(&app_events, LOC_EVT_AWAY);
     }
+    
     else if (strstr(buf, "\"ack\": true")) {
         event.type = EVENT_SERVER_ACK_ALERT;
         zbus_chan_pub(&fsm_events_chan, &event, K_NO_WAIT);
