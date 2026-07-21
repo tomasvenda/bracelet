@@ -5,3 +5,7 @@ detector_accuracy -DEXTRA_CONF_FILE="overlay-detector-accuracy.conf"
 LTE on/off vs PSM
 power_test_modem_off  -DEXTRA_CONF_FILE=overlay-power-test.conf
 power_test_psm -DEXTRA_CONF_FILE=overlay-power-test.conf -DCONFIG_APP_POWER_TEST_PSM=y
+
+GNSS vs AGNSS:
+assisted_gnss_test -DEXTRA_CONF_FILE=overlay-gnss-test.conf -DCONFIG_APP_GNSS_TEST_ASSISTED=y
+gnss_fix_power -DEXTRA_CONF_FILE=overlay-gnss-test.conf 
