@@ -27,6 +27,8 @@ int main(void)
     printf("      BRACELET TRACKER BOOTING...       \n");
     printf("========================================\n");
 
+    sensors_startup_blink_start();
+
     /* 1. Initialize Hardware Sensors & Interrupts */
     if (sensors_init() != 0) {
         printf("[FATAL] Sensor initialization failed! Check PMIC/I2C.\n");
@@ -48,6 +50,8 @@ int main(void)
 
     /* Start the FSM */
     k_thread_start(fsm_tid);
+
+    sensors_startup_blink_stop();
 
     /* Main thread goes to sleep to save power */
     k_sleep(K_FOREVER);

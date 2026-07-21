@@ -164,6 +164,8 @@ static void deep_sleep_entry(void *o) {
         k_timer_start(&cooldown_timer, K_MINUTES(10), K_NO_WAIT);
     }
 
+    sensors_notify_deep_sleep();
+
     fsm.previous_state = STATE_DEEP_SLEEP;
 }
 
@@ -205,8 +207,6 @@ static void location_ping_entry(void *o) {
     printf("[STATE] Entered LOCATION_PING. Updating location...\n");
     fsm.previous_state = STATE_LOCATION_PING;
 
-    sensors_led_on(LED_BLUE);
-
     sensors_disable_motion_trigger();
 
     loc_ping_retries = 0;
@@ -247,6 +247,8 @@ static void active_tracking_entry(void *o) {
     fsm.previous_state = STATE_ACTIVE_TRACKING;
     sensors_led_off(LED_BLUE);
     k_timer_start(&tracking_timer, K_MINUTES(3), K_NO_WAIT);   /* one-shot */
+
+    sensors_notify_active_tracking();
 }
 
 static void active_tracking_exit(void *o) {
@@ -360,7 +362,6 @@ static enum smf_state_result evaluation_run(void *o) {
     return SMF_EVENT_HANDLED;
 }
 
-
 // --- ALERT (Emergency) ---
 /* Leaving ALERT requires BOTH: server acked the panic message AND the
  * alert localization stack ran to completion. Order can be either. */
@@ -373,7 +374,7 @@ static void alert_entry(void *o) {
     alert_pending_confirm = true;
 
     /* Hardware indications */
-    sensors_led_off(LED_BLUE);
+    sensors_led_off(LED_BLUE);  // may be used in case we come from EVALUATION
     sensors_led_on(LED_RED);
     alert_beep_start(); 
 

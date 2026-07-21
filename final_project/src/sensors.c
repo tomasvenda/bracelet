@@ -817,3 +817,105 @@ int get_battery_level(void)
 
     return battery_mv_to_pct(mv);
 }
+
+/* ======================================================================
+ * STARTUP BLINK: alternating BLUE/RED until setup completes
+ * ====================================================================== */
+static bool startup_blink_is_blue;
+static void startup_blink_work_fn(struct k_work *work);
+static K_WORK_DEFINE(startup_blink_work, startup_blink_work_fn);
+
+static void startup_blink_work_fn(struct k_work *work)
+{
+    if (startup_blink_is_blue) {
+        sensors_led_off(LED_BLUE);
+        sensors_led_on(LED_RED);
+    } else {
+        sensors_led_off(LED_RED);
+        sensors_led_on(LED_BLUE);
+    }
+    startup_blink_is_blue = !startup_blink_is_blue;
+}
+
+static void startup_blink_timer_cb(struct k_timer *timer_id)
+{
+    k_work_submit(&startup_blink_work);
+}
+K_TIMER_DEFINE(startup_blink_timer, startup_blink_timer_cb, NULL);
+
+void sensors_startup_blink_start(void)
+{
+    startup_blink_is_blue = true;
+    sensors_led_on(LED_BLUE);   /* called from thread context (main.c), so this is fine */
+    k_timer_start(&startup_blink_timer, K_MSEC(300), K_MSEC(300));
+}
+
+void sensors_startup_blink_stop(void)
+{
+    k_timer_stop(&startup_blink_timer);
+    k_work_cancel(&startup_blink_work);   /* in case one is still pending */
+    sensors_led_off(LED_RED);
+    sensors_led_off(LED_BLUE);
+}
+
+/* ======================================================================
+ * ONE-SHOT NOTIFICATION BLINKS
+ * ====================================================================== */
+static void blink_n_times(uint8_t color, int times, int on_ms, int off_ms)
+{
+    for (int i = 0; i < times; i++) {
+        sensors_led_on(color);
+        k_sleep(K_MSEC(on_ms));
+        sensors_led_off(color);
+        if (i < times - 1) {
+            k_sleep(K_MSEC(off_ms));
+        }
+    }
+}
+
+void sensors_notify_deep_sleep(void)
+{
+    blink_n_times(LED_GREEN, 2, 150, 150);
+}
+
+void sensors_notify_active_tracking(void)
+{
+    blink_n_times(LED_CYAN, 2, 150, 150);
+}
+
+/* ======================================================================
+ * LOCALIZATION BLINK: yellow blinking while a fix/scan is in progress
+ * ====================================================================== */
+static bool loc_blink_is_on;
+static void loc_blink_work_fn(struct k_work *work);
+static K_WORK_DEFINE(loc_blink_work, loc_blink_work_fn);
+
+static void loc_blink_work_fn(struct k_work *work)
+{
+    if (loc_blink_is_on) {
+        sensors_led_off(LED_YELLOW);
+    } else {
+        sensors_led_on(LED_YELLOW);
+    }
+    loc_blink_is_on = !loc_blink_is_on;
+}
+
+static void loc_blink_timer_cb(struct k_timer *timer_id)
+{
+    k_work_submit(&loc_blink_work);   /* ISR-safe hand-off; never touch LED/mutex here */
+}
+K_TIMER_DEFINE(loc_blink_timer, loc_blink_timer_cb, NULL);
+
+void sensors_localization_blink_start(void)
+{
+    loc_blink_is_on = true;
+    sensors_led_on(LED_YELLOW);
+    k_timer_start(&loc_blink_timer, K_MSEC(400), K_MSEC(400));
+}
+
+void sensors_localization_blink_stop(void)
+{
+    k_timer_stop(&loc_blink_timer);
+    k_work_cancel(&loc_blink_work);
+    sensors_led_off(LED_YELLOW);
+}

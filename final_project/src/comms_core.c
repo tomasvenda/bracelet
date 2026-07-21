@@ -257,8 +257,12 @@ static void localization_thread_fn(void *arg1, void *arg2, void *arg3)
     while (1) {
         k_sem_take(&loc_start_sem, K_FOREVER);
         
+        sensors_localization_blink_start(); // Turns on LED yellow blink
+
         bool success = perform_localization_work();
         
+        sensors_localization_blink_stop(); // Turns off LED yellow blink
+
         atomic_set(&loc_busy, 0);
 
         /* Broadcast the exact outcome to the FSM */

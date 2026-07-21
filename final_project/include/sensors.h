@@ -21,6 +21,9 @@
 #define LED_GREEN BIT(1)
 #define LED_BLUE  BIT(2)
 
+#define LED_YELLOW (LED_RED | LED_GREEN)
+#define LED_CYAN   (LED_GREEN | LED_BLUE)
+
 int  sensors_init(void);
 
 /* Light-motion (any-motion) trigger control -- used by the FSM wake 
@@ -57,5 +60,24 @@ void sensors_evaluation_done(void);
 /* Reads battery voltage from the nPM1300 charger/gauge and converts it
  * to an approximate percentage by preset values in a voltage lookup table. */
 int get_battery_level(void);
+
+/* Startup indicator: blinks BLUE/RED alternately until setup completes.
+ * Call sensors_startup_blink_start() before init work begins, and
+ * sensors_startup_blink_stop() once sensors_init()/comms_init() finish. */
+void sensors_startup_blink_start(void);
+void sensors_startup_blink_stop(void);
+
+/* Loclaization indicator: blinks yellow for localization in progress.
+ * Call sensors_localization_blink_start() when a localization attempt
+ * begins, and sensors_localization_blink_stop() when it ends
+ * (success, failure, or timeout). */
+void sensors_localization_blink_start(void);
+void sensors_localization_blink_stop(void);
+
+/* One-shot notification blinks. Both block briefly (~600ms) and should
+ * only be called from contexts where that's acceptable (state entry
+ * functions, not ISRs). */
+void sensors_notify_deep_sleep(void);      /* 2x green blinks */
+void sensors_notify_active_tracking(void); /* 2x cyan blinks  */
 
 #endif /* SENSORS_H */
