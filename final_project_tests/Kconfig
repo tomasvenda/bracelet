@@ -1,0 +1,49 @@
+source "Kconfig.zephyr"
+
+menu "Communication with MQTT broker"
+
+config MQTT_BROKER_HOSTNAME
+    string "MQTT broker Azure Server"
+    default "20.251.201.46"
+    help
+      WARNING: Avoid static IPs for production. Use a domain name.
+
+config MQTT_BOOTSTRAP_SECURITY_CODE
+    string "Bootstrap security code"
+    default "987654"
+    help
+      The security code sent in the first MQTT message after boot.
+      The server uses this to register the bracelet in its database.
+      The mobile app user must enter this exact code when pairing.
+
+endmenu
+
+menu "Temporary Test Harnesses"
+
+config APP_POWER_TEST
+    bool "Run LTE power comparison test instead of the FSM"
+    default n
+
+config APP_POWER_TEST_PSM
+    bool "Use PSM sleep between cycles (n = modem full off)"
+    depends on APP_POWER_TEST
+    default n
+
+config APP_DETECTOR_POWER_TEST
+    bool "Run detector energy benchmark instead of the FSM"
+    default n
+
+config APP_DETECTOR_ACCURACY_TEST
+    bool "Run automated detector accuracy trial instead of the FSM"
+    default n
+
+config APP_GNSS_POWER_TEST
+    bool "Run GNSS standalone vs assisted power test instead of the FSM"
+    default n
+
+config APP_GNSS_TEST_ASSISTED
+    bool "Use A-GNSS assistance (n = standalone)"
+    depends on APP_GNSS_POWER_TEST
+    default n
+
+endmenu

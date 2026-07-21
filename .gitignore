@@ -2,59 +2,48 @@
 /*
 
 # 2. Allowlist the specific folders you want to track
-!adxl367/
-!bme688/
-!bmi270/
-!npm1300/
-!scan/
-!server_com/
-!bracelet/
-!barometer/
 !accelerometer/
-!wifi/
+!barometer/
+!barometer_fifo/
 !button_led_buzzer/
 !display/
 !final_project/
-!memory/
+!final_project_tests/
+!gnss/
 !lte_pcb/
-!test/
-!test_model/
-!fall_detection_logger/
+!memory/
 !new_data_logger/
-!barometer_fifo/
+!power/
+!server_com/
+!test_model/
+!wifi/
+
+!run_tests.txt
+!logging.py
 
 # 3. Allowlist this .gitignore file so it gets pushed to GitHub
 !.gitignore
 
 # 4. CRITICAL: Ignore all Zephyr build artifacts inside your allowed folders
-adxl367/build/
-bme688/build/
-bmi270/build/
-npm1300/build/
-scan/build/
-bracelet/build/
-barometer/build/
-accelerometer/build/
-wifi/build/
-button_led_buzzer/build/
-display/build/
-final_project/build/
-memory/build/
-memory/build_1/
+accelerometer/build
+barometer/build
+barometer_fifo/build
+button_led_buzzer/build
+display/build
+final_project/build
+final_project_tests/build
+final_project_tests/assisted_gnss_test
+final_project_tests/gnss_fix_power
+final_project_tests/detector_accuracy
+final_project_tests/detector_power
+gnss/build
 lte_pcb/build
-test/build/
-test_model/build/
+memory/build
+new_data_logger/build
+power/build
+server_com/build
+test_model/build
 test_model/edge-impulse-sdk/
 test_model/model-parameters/
 test_model/tflite-model/
-fall_detection_logger/build/
-new_data_logger/build/
-barometer_fifo/build/
-
-
-# Ignore the contents of the build directory except the dfu_application.zip
-server_com/build/*
-!server_com/build/dfu_application.zip
-
-# Ignore TODO
-todo.txt
+wifi/build
