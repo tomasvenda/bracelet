@@ -30,11 +30,16 @@ int main(void)
     }
     printf("MAIN: sensors_init OK\n");
 
+#if defined(CONFIG_APP_COLLECT_DATA)
+    printf("MAIN: comms skipped (data-collection build)\n");
+#else
     if (comms_init() != 0) {
         printf("[FATAL] Communications initialization failed! Check SIM/Antenna.\n");
         return -1;
     }
     printf("MAIN: comms_init OK\n");
+#endif
+    
 
     
     printf("========================================\n");
@@ -54,6 +59,12 @@ int main(void)
     detector_accuracy_test_run();
 #elif defined(CONFIG_APP_GNSS_POWER_TEST)
     gnss_power_test_run();
+#elif defined(CONFIG_APP_DETECTOR_ACCURACY_TEST)
+    extern void detector_accuracy_test_run(void);
+    detector_accuracy_test_run();
+#elif defined(CONFIG_APP_COLLECT_DATA)
+    extern void collect_data_run(void);
+    collect_data_run();
 #else
     k_thread_start(fsm_tid);
     k_sleep(K_FOREVER);

@@ -32,12 +32,13 @@ int  sensors_init(void);
 void sensors_enable_motion_trigger(void);
 void sensors_disable_motion_trigger(void);
 
-/* Capture one 3-second fall window (1.5 s pre-impact from the FIFO +
- * 1.5 s post-impact) and write it as interleaved model features:
- *   [x0,y0,z0,dp0, x1,y1,z1,dp1, ...]
+/* Capture one 4.5-second fall window (1.5 s pre-impact from the FIFO +
+ * 3 s post-impact) and write it as interleaved model features:
+ *   [x0,y0,z0,dp0,press_step0 x1,y1,z1,dp1,press_step1 ...]
  * accel in g, dp = pressure delta in hPa from the first sample.
- * 'count' must be 600 (150 frames x 4 axes).
- * Blocks for ~3.5 s. Returns 0 on success, negative on short capture.
+ * press_step is the median of pressure
+ * 'count' must be 1125 (225 frames x 5 axes).
+ * Returns 0 on success, negative on short capture.
  * Rearms the low-g trigger before returning. */
 int  sensors_capture_fall_window(float *features, size_t count);
 

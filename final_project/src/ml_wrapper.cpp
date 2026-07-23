@@ -5,6 +5,8 @@
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 #include <zephyr/sys/printk.h>
 #include <string.h>
+#include "model-parameters/model_metadata.h"
+#include "model-parameters/model_variables.h"
 
 #include "ml_wrapper.h"
 
@@ -18,6 +20,7 @@ extern "C" size_t ml_wrapper_input_size(void)
     return EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
 }
 
+
 extern "C" int run_fall_inference(const float *features, size_t count)
 {
     if (count != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
@@ -27,20 +30,18 @@ extern "C" int run_fall_inference(const float *features, size_t count)
     }
 
     signal_t signal;
+
     if (numpy::signal_from_buffer(features, count, &signal) != 0) {
         printk("[ML] signal_from_buffer failed\n");
         return -2;
     }
 
     ei_impulse_result_t result = { 0 };
-    EI_IMPULSE_ERROR rc = run_classifier(&signal, &result, false);
+    EI_IMPULSE_ERROR rc = run_classifier(&signal, &result, true);  
     if (rc != EI_IMPULSE_OK) {
         printk("[ML] run_classifier failed: %d\n", (int)rc);
         return -3;
     }
-
-    printk("[ML] DSP %d ms, NN %d ms\n",
-           result.timing.dsp, result.timing.classification);
 
     size_t best = 0;
     for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {

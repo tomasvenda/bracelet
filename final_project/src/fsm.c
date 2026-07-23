@@ -290,7 +290,7 @@ static enum smf_state_result active_tracking_run(void *o) {
  * workqueue; the FSM thread stays free to receive the panic button
  * (global override) the whole time.
  * ====================================================================== */
-static float ml_features[600];   /* 150 frames x 4 axes */
+static float ml_features[1125];   /* 225 frames x 5 axes [ax,ay,az,dp,press_step] */
 
 static void do_ml_evaluation_work(struct k_work *work) {
     printf("[EVALUATION] Harsh impact detected! Capturing 3s event window...\n");

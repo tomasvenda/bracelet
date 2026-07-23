@@ -41,24 +41,23 @@
 
 #include <stdint.h>
 #include "model_metadata.h"
-#include "anomaly_metadata.h"
-#include "tflite-model/tflite_learn_1022358_14_compiled.h"
+#include "tflite-model/tflite_learn_1022358_32_compiled.h"
 #include "edge-impulse-sdk/classifier/ei_model_types.h"
 #include "edge-impulse-sdk/classifier/inferencing_engines/engines.h"
 #include "edge-impulse-sdk/classifier/postprocessing/ei_postprocessing_common.h"
 
-const char* ei_classifier_inferencing_categories_1022358_1[] = { "fall", "no_fall" };
+const char* ei_classifier_inferencing_categories_1022358_4[] = { "fall", "no_fall" };
 
-EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1022358_12_axes[] = { 0, 1, 2 };
-const uint32_t ei_dsp_config_1022358_12_axes_size = 3;
-ei_dsp_config_spectral_analysis_t ei_dsp_config_1022358_12 = {
-    12, // uint32_t blockId
+EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1022358_27_axes[] = { 0, 1, 2 };
+const uint32_t ei_dsp_config_1022358_27_axes_size = 3;
+ei_dsp_config_spectral_analysis_t ei_dsp_config_1022358_27 = {
+    27, // uint32_t blockId
     4, // int implementationVersion
     3, // int length of axes
     0.5f, // float scale-axes
     1, // int input-decimation-ratio
     "high", // select filter-type
-    7.6171875f, // float filter-cutoff
+    3.80859375f, // float filter-cutoff
     6, // int filter-order
     "Wavelet", // select analysis-type
     4096, // int fft-length
@@ -72,10 +71,10 @@ ei_dsp_config_spectral_analysis_t ei_dsp_config_1022358_12 = {
     false // boolean extra-low-freq
 };
 
-EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1022358_13_axes[] = { 3 };
-const uint32_t ei_dsp_config_1022358_13_axes_size = 1;
-ei_dsp_config_flatten_t ei_dsp_config_1022358_13 = {
-    13, // uint32_t blockId
+EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1022358_28_axes[] = { 3 };
+const uint32_t ei_dsp_config_1022358_28_axes_size = 1;
+ei_dsp_config_flatten_t ei_dsp_config_1022358_28 = {
+    28, // uint32_t blockId
     1, // int implementationVersion
     1, // int length of axes
     1.0f, // float scale-axes
@@ -89,38 +88,74 @@ ei_dsp_config_flatten_t ei_dsp_config_1022358_13 = {
     0 // int moving_avg_num_windows
 };
 
-const float ei_dn_standard_scaler_mean_1022358_12[84] = { 3.382785556697044, 0.6587240147490462, 0.6517580715047211, -0.07853510409217923, -0.024901115676454668, 0.024614149862078622, 0.08076456054544248, 0.00015352361949461194, 0.000015930380648458732, 0.05442676689679257, 0.003662809810284212, 0.05442851620233234, 0.00939649936377204, 3.618331597546632, 3.2477663444871663, 0.6740933195883486, 0.6545776150056294, -0.18108587751180685, -0.05370256385155523, 0.052892552375668235, 0.189753963025052, 0.0005424918185666937, 0.001174069254658138, 0.1347494129279331, 0.02198696761497711, 0.13482488784156427, 0.1310005151674527, 5.701347414701551, 3.239114517925166, 0.6738721793439207, 0.6661322424892618, -0.039826314242854086, -0.00997370807894216, 0.010114789569648687, 0.039097446478715464, 0.00020512150542439, -0.00001697012656397536, 0.029770565094003658, 0.0011044754155132793, 0.029771150727638928, -0.05476158539257834, 5.080660445200858, 3.090785354626279, 0.6790689948727103, 0.6488279478014016, -0.09733447078771952, -0.02303986983645723, 0.022139098914927106, 0.0932844244100216, 0.0005316723773461024, -0.0008233647159181792, 0.08093818791304566, 0.008406756111927441, 0.08102036136038163, -0.25166656022515743, 8.026262682166044, 3.287332431608889, 0.6758071619923375, 0.6716607667568351, -0.0736086320781595, -0.02106540694738887, 0.021087222462598264, 0.07307232361474708, 0.00041466286943028715, -0.000044305713469673014, 0.05290505604254974, 0.0033628365821366498, 0.05290653824634036, 0.05079373928127388, 4.6602786890037375, 3.1688941697112654, 0.6841552397784065, 0.6675143682656168, -0.18778991354864186, -0.04980469930979634, 0.04731430610477486, 0.18223231299897702, 0.00035450312771969657, -0.0009782214914089652, 0.14003202197055856, 0.023484001149904735, 0.14012107084027858, 0.007229259139819055, 6.614539976850026 };
-const float ei_dn_standard_scaler_scale_1022358_12[84] = { 2.6303986994886284, 28.707604414183432, 22.393876137968, 24.52521056694097, 57.161168388338766, 56.47581671486373, 22.96031411221367, 268.038613992125, 1940.2981953401008, 39.15275622942717, 289.9242263368153, 39.15049294801988, 1.628261730237767, 0.22544102003521577, 2.13098610165002, 22.422281626321148, 10.434906291439662, 10.001395203094217, 25.520726625272694, 27.267784098690605, 9.920842542467554, 174.65713640416226, 242.65050008603353, 16.806696343254497, 45.246046578456266, 16.811407240237862, 0.9333943222071325, 0.15390894417407766, 2.1215701009612795, 27.377512080153316, 22.657899514900837, 49.742411819425506, 162.8491869752558, 156.7301534570164, 55.717354490123654, 736.2872521775629, 5432.701363277616, 70.07306066449989, 828.4325379402013, 70.07318101054192, 1.7331723260074312, 0.20174640387709727, 1.9776437500843012, 24.95941574271707, 10.797592174537167, 19.492080512900245, 68.90890378778347, 71.06444422093662, 19.066249863259625, 376.98292714327505, 258.8007176197729, 23.93776178983831, 100.13843408085465, 23.92200522982026, 0.7375352628687264, 0.13214598924690787, 2.1236402288094367, 29.544199259209524, 24.245668914753818, 24.715882533336426, 66.89518326464577, 66.41396624089812, 24.822644311807654, 318.092243490681, 2407.0111276104017, 43.86792906906749, 318.721168527366, 43.867181314960405, 1.7934016053589663, 0.19930496340807405, 1.9334298912288461, 22.780405331198978, 11.424320257301053, 9.865639235376293, 29.159122480973043, 28.678499720553635, 9.918560784528509, 237.4468793724103, 197.30781021805674, 16.745852532973107, 44.47315800740171, 16.74187076034163, 0.8581125464753017, 0.13496996665993521 };
-const float ei_dn_standard_scaler_var_1022358_12[84] = { 0.1445296123123551, 0.0012134058762485003, 0.001994074851917917, 0.0016625492156979171, 0.0003060538206401003, 0.0003135270092930663, 0.0018968996202879732, 0.000013918911480098881, 2.6562138723254243e-7, 0.0006523419675258287, 0.00001189682261443388, 0.0006524173931979603, 0.3771825296273143, 19.675877880647338, 0.22021087649117885, 0.001989025696593953, 0.009183810066378544, 0.00999721017768045, 0.0015353731059752115, 0.0013449319373212692, 0.010160214723897871, 0.00003278138732691668, 0.000016983907607186557, 0.0035402610992504966, 0.0004884709305655911, 0.003538277271440608, 1.1478091710822966, 42.21553351440172, 0.22216990400952155, 0.0013341726743505986, 0.0019478733112694908, 0.00040415347987873736, 0.00003770759298065511, 0.00004070941695084417, 0.00032212098979575275, 0.0000018446137319967007, 3.3881945155875236e-8, 0.00020365628897526592, 0.0000014570877390181859, 0.00020365558944352187, 0.33290207959125573, 24.569051782058157, 0.25568419183017166, 0.0016052074619571325, 0.008577212300792156, 0.002631986193751431, 0.00021059561188833568, 0.0001980137152177608, 0.00275086602603944, 0.000007036499084191678, 0.000014930317645392356, 0.001745150629291342, 0.00009972370569878623, 0.001747450321661989, 1.8383763355165261, 57.265364203357095, 0.22173697197738745, 0.0011456594784875207, 0.0017011071078756642, 0.0016369965157011135, 0.00022346540775904666, 0.00022671547548142783, 0.0016229454082820327, 0.000009883114835161018, 1.726011972805167e-7, 0.0005196437818904064, 0.000009844149078959122, 0.000519661497598241, 0.310917302859266, 25.174669130477003, 0.26751192271226654, 0.0019269795493273205, 0.007661949084956557, 0.010274236053582117, 0.001176118549856791, 0.001215870002819975, 0.010164889962119648, 0.0000177364650499669, 0.000025686885311355303, 0.00356603396368491, 0.0005055965025051976, 0.0035677304079062026, 1.3580366677993014, 54.894106276707845 };
-ei_data_normalization_standard_scaler_config_t ei_data_normalization_standard_scaler_config_1022358_12 = {
-    .mean_data = (float *)ei_dn_standard_scaler_mean_1022358_12,
+EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1022358_31_axes[] = { 4 };
+const uint32_t ei_dsp_config_1022358_31_axes_size = 1;
+ei_dsp_config_flatten_t ei_dsp_config_1022358_31 = {
+    31, // uint32_t blockId
+    1, // int implementationVersion
+    1, // int length of axes
+    1.0f, // float scale-axes
+    false, // boolean average
+    false, // boolean minimum
+    true, // boolean maximum
+    false, // boolean rms
+    false, // boolean stdev
+    false, // boolean skewness
+    false, // boolean kurtosis
+    0 // int moving_avg_num_windows
+};
+
+const float ei_dn_standard_scaler_mean_1022358_27[84] = { 3.2222579943828094, 0.4260009004519536, 0.4224021598314628, -0.09768863960814017, -0.022673301789790202, 0.0232158617877688, 0.09481022281046861, 0.0002594289998720948, 0.00006471201400134491, 0.070817550816215, 0.006307888043430956, 0.07082000938841165, 0.0032266119918905388, 7.104921195675165, 2.923083342649998, 0.534907783758946, 0.5202879003225229, -0.13770064033376864, -0.028325403053485132, 0.02749181226469003, 0.1294115632867966, 0.00011953258422035782, -0.00011609649308621346, 0.12382945811423736, 0.0210230418321981, 0.12386426645784807, 0.033708613413648725, 13.924212849827914, 3.2420554913007296, 0.4628430071549538, 0.4605937950122051, -0.11066719628392886, -0.025359499533974136, 0.025803623718578212, 0.11132380425547943, 0.0002758075281165545, 0.0001362218069347457, 0.08020945775250976, 0.008733231348555703, 0.08021163783537653, 0.07484457795358955, 6.8317047444578165, 3.0178199835312673, 0.5896536212701063, 0.5790373339102819, -0.17971350755542517, -0.037762698789876405, 0.03714177834688319, 0.17715787953959825, -0.00017206322039176787, 0.00023282101764589942, 0.15130142433903157, 0.032013503997437416, 0.1513305140706973, 0.12476193396604429, 10.715183589741205, 3.2886058966318767, 0.44588394287305, 0.4407557375920125, -0.10297424217256215, -0.024373981036627905, 0.024083542182462482, 0.1000592931245382, 0.00032304505581904757, -0.00040658648941200974, 0.07340943424078898, 0.006866585921111086, 0.07341241443481965, -0.09112401727873545, 6.005960604142493, 3.036945701868106, 0.5656770136111822, 0.5529014850274111, -0.15334504688970554, -0.03137916407409088, 0.033021703798126856, 0.14652423420204566, 0.0001090989914345277, -0.000482477258027267, 0.1282408397644758, 0.02202664401012067, 0.12827478630038408, -0.1270572973531671, 10.60210000933745 };
+const float ei_dn_standard_scaler_scale_1022358_27[84] = { 1.9408388434217358, 23.083601136389284, 21.568907254541273, 17.915597808310604, 64.15115083004545, 61.96435547322501, 18.03564109162829, 534.924829398437, 1633.2879866981843, 28.42756297505271, 152.2556028408603, 28.427208946031566, 1.3799366995403994, 0.1385978938641832, 1.6828612297515346, 16.83475587891553, 12.74480426867906, 11.016284018421262, 52.47350194250329, 55.39545448516175, 12.441898605596919, 439.2114277765627, 325.64288915045876, 13.478001699791484, 39.18694593572658, 13.476995861269666, 0.56364045836252, 0.09265308937015938, 2.0150405379318594, 20.96969976689714, 18.9210052390122, 13.887208883701215, 50.835042887002075, 51.60575989550218, 13.236549133901867, 387.56105300162653, 1645.7160983368335, 21.209172509693165, 83.77616592450799, 21.208990100570375, 1.2915830683454483, 0.1461596376546587, 1.6550845257554687, 15.925989141004077, 11.567921630365321, 8.163786382783941, 35.64454483372398, 36.51466530532909, 7.76287717996559, 338.8935218454831, 298.7204712284424, 10.635551978784905, 25.015975091630654, 10.634074227782614, 0.8594206314752446, 0.10626372858433024, 2.1647006655625667, 22.064517834790117, 18.805208170848385, 17.710894139604203, 59.664960531475515, 59.47775019867512, 18.912310032131852, 486.0077133488284, 1839.5526991982308, 26.561500744746535, 150.3223796318312, 26.56128242766919, 1.454522091650815, 0.16436241593760323, 1.842774472235929, 16.888859899012495, 12.602672795096169, 10.280454480012384, 42.9449064114778, 41.25007730393651, 10.645020253890914, 355.4807791932982, 313.40178037501414, 13.6237824960536, 42.386755096141634, 13.621626153752546, 0.7806084427997864, 0.11238189515687531 };
+const float ei_dn_standard_scaler_var_1022358_27[84] = { 0.26547342266355295, 0.0018766914569997354, 0.0021495310060106387, 0.0031155691252406116, 0.00024299150814294267, 0.00026044506133596603, 0.0030742333631256402, 0.0000034947369056908457, 3.748646297059761e-7, 0.001237430281115194, 0.00004313734717177002, 0.001237461102921156, 0.5251479448167671, 52.05791122225021, 0.3531046117376264, 0.0035284693872952464, 0.006156496825145773, 0.008240048189004237, 0.0003631783091394904, 0.00032587552236016635, 0.006459913228564217, 0.000005183853710337264, 0.000009430110930849167, 0.005504894324432936, 0.00065120415746425, 0.005505716056731711, 3.1477170116719506, 116.48773221263001, 0.24628186000862629, 0.0022741315059624585, 0.0027932614525164614, 0.005185254344737001, 0.0003869667156306144, 0.0003754945562210051, 0.005707559503018736, 0.000006657631381908542, 3.692242059478619e-7, 0.0022230669948636213, 0.00014248168373391415, 0.0022231052342557194, 0.5994532426166431, 46.81069451202028, 0.36505612832915035, 0.0039426404151841985, 0.00747290264710299, 0.015004334428784126, 0.0007870708957025849, 0.0007500070599888427, 0.016594133126868457, 0.000008707098665978269, 0.000011206500854987552, 0.0088405631571519, 0.0015979571465659947, 0.008843020363770599, 1.3539058023769532, 88.55842809500629, 0.21340485655775163, 0.0020540505014674222, 0.0028277675685375236, 0.0031880052325910665, 0.000280906174029493, 0.0002826773002466334, 0.0027958305273185296, 0.000004233637566171356, 2.955122796170368e-7, 0.0014174076790357383, 0.00004425401877584826, 0.0014174309795352113, 0.4726714339658092, 37.016467160561966, 0.29447987848381246, 0.0035058984623728318, 0.006296144379976306, 0.009461835016686338, 0.0005422214308771511, 0.0005876929304335792, 0.008824843570684101, 0.00000791348444637487, 0.000010181155753684484, 0.005387714785667611, 0.0005565954590609263, 0.005389420701940642, 1.641094204169965, 79.17850490161558 };
+ei_data_normalization_standard_scaler_config_t ei_data_normalization_standard_scaler_config_1022358_27 = {
+    .mean_data = (float *)ei_dn_standard_scaler_mean_1022358_27,
     .mean_data_len = 84,
-    .scale_data = (float *)ei_dn_standard_scaler_scale_1022358_12,
+    .scale_data = (float *)ei_dn_standard_scaler_scale_1022358_27,
     .scale_data_len = 84,
-    .var_data = (float *)ei_dn_standard_scaler_var_1022358_12,
+    .var_data = (float *)ei_dn_standard_scaler_var_1022358_27,
     .var_data_len = 84
 };
-ei_data_normalization_t ei_data_normalization_config_1022358_12 = {
-    (void *) &ei_data_normalization_standard_scaler_config_1022358_12, // config
+ei_data_normalization_t ei_data_normalization_config_1022358_27 = {
+    (void *) &ei_data_normalization_standard_scaler_config_1022358_27, // config
     DATA_NORMALIZATION_METHOD_STANDARD_SCALER, // method
     nullptr, // context
     nullptr, // init func
     nullptr, // deinit func
     &data_normalization_standard_scaler // exec func
 };
-const float ei_dn_standard_scaler_mean_1022358_13[4] = { 0.00025462183942984076, -0.030378150863244253, 0.031092436647653078, 0.005582491167774033 };
-const float ei_dn_standard_scaler_scale_1022358_13[4] = { 2473.4068210386567, 29.25597353711134, 27.93819758862689, 228.56015137181265 };
-const float ei_dn_standard_scaler_var_1022358_13[4] = { 1.6345902034369225e-7, 0.0011683444261590115, 0.0012811595875851169, 0.000019142513850464153 };
-ei_data_normalization_standard_scaler_config_t ei_data_normalization_standard_scaler_config_1022358_13 = {
-    .mean_data = (float *)ei_dn_standard_scaler_mean_1022358_13,
+const float ei_dn_standard_scaler_mean_1022358_28[4] = { 0.023327020176190837, -0.03255897437771543, 0.07325641060343538, 0.02858887383571038 };
+const float ei_dn_standard_scaler_scale_1022358_28[4] = { 23.939255358838043, 32.37462293885582, 13.921710259903538, 47.1173712350733 };
+const float ei_dn_standard_scaler_var_1022358_28[4] = { 0.0017449328763553447, 0.0009540926760275871, 0.005159585553951903, 0.0004504409806179442 };
+ei_data_normalization_standard_scaler_config_t ei_data_normalization_standard_scaler_config_1022358_28 = {
+    .mean_data = (float *)ei_dn_standard_scaler_mean_1022358_28,
     .mean_data_len = 4,
-    .scale_data = (float *)ei_dn_standard_scaler_scale_1022358_13,
+    .scale_data = (float *)ei_dn_standard_scaler_scale_1022358_28,
     .scale_data_len = 4,
-    .var_data = (float *)ei_dn_standard_scaler_var_1022358_13,
+    .var_data = (float *)ei_dn_standard_scaler_var_1022358_28,
     .var_data_len = 4
 };
-ei_data_normalization_t ei_data_normalization_config_1022358_13 = {
-    (void *) &ei_data_normalization_standard_scaler_config_1022358_13, // config
+ei_data_normalization_t ei_data_normalization_config_1022358_28 = {
+    (void *) &ei_data_normalization_standard_scaler_config_1022358_28, // config
+    DATA_NORMALIZATION_METHOD_STANDARD_SCALER, // method
+    nullptr, // context
+    nullptr, // init func
+    nullptr, // deinit func
+    &data_normalization_standard_scaler // exec func
+};
+const float ei_dn_standard_scaler_mean_1022358_31[1] = { 0.03774871808202125 };
+const float ei_dn_standard_scaler_scale_1022358_31[1] = { 16.690522510605717 };
+const float ei_dn_standard_scaler_var_1022358_31[1] = { 0.0035897163599239034 };
+ei_data_normalization_standard_scaler_config_t ei_data_normalization_standard_scaler_config_1022358_31 = {
+    .mean_data = (float *)ei_dn_standard_scaler_mean_1022358_31,
+    .mean_data_len = 1,
+    .scale_data = (float *)ei_dn_standard_scaler_scale_1022358_31,
+    .scale_data_len = 1,
+    .var_data = (float *)ei_dn_standard_scaler_var_1022358_31,
+    .var_data_len = 1
+};
+ei_data_normalization_t ei_data_normalization_config_1022358_31 = {
+    (void *) &ei_data_normalization_standard_scaler_config_1022358_31, // config
     DATA_NORMALIZATION_METHOD_STANDARD_SCALER, // method
     nullptr, // context
     nullptr, // init func
@@ -128,159 +163,149 @@ ei_data_normalization_t ei_data_normalization_config_1022358_13 = {
     &data_normalization_standard_scaler // exec func
 };
 
-const uint8_t ei_dsp_blocks_1022358_1_size = 2;
-ei_model_dsp_t ei_dsp_blocks_1022358_1[ei_dsp_blocks_1022358_1_size] = {
-    { // DSP block 12
-        12,
+const uint8_t ei_dsp_blocks_1022358_4_size = 3;
+ei_model_dsp_t ei_dsp_blocks_1022358_4[ei_dsp_blocks_1022358_4_size] = {
+    { // DSP block 27
+        27,
         84, // output size
         &extract_spectral_analysis_features, // DSP function pointer
-        (void*)&ei_dsp_config_1022358_12, // pointer to config struct
-        ei_dsp_config_1022358_12_axes, // array of offsets into the input stream, one for each axis
-        ei_dsp_config_1022358_12_axes_size, // number of axes
+        (void*)&ei_dsp_config_1022358_27, // pointer to config struct
+        ei_dsp_config_1022358_27_axes, // array of offsets into the input stream, one for each axis
+        ei_dsp_config_1022358_27_axes_size, // number of axes
         1, // version
         nullptr, // factory function
-        &ei_data_normalization_config_1022358_12, // data normalization config
+        &ei_data_normalization_config_1022358_27, // data normalization config
     },
-    { // DSP block 13
-        13,
+    { // DSP block 28
+        28,
         4, // output size
         &extract_flatten_features, // DSP function pointer
-        (void*)&ei_dsp_config_1022358_13, // pointer to config struct
-        ei_dsp_config_1022358_13_axes, // array of offsets into the input stream, one for each axis
-        ei_dsp_config_1022358_13_axes_size, // number of axes
+        (void*)&ei_dsp_config_1022358_28, // pointer to config struct
+        ei_dsp_config_1022358_28_axes, // array of offsets into the input stream, one for each axis
+        ei_dsp_config_1022358_28_axes_size, // number of axes
         1, // version
         flatten_class::create, // factory function
-        &ei_data_normalization_config_1022358_13, // data normalization config
+        &ei_data_normalization_config_1022358_28, // data normalization config
+    },
+    { // DSP block 31
+        31,
+        1, // output size
+        &extract_flatten_features, // DSP function pointer
+        (void*)&ei_dsp_config_1022358_31, // pointer to config struct
+        ei_dsp_config_1022358_31_axes, // array of offsets into the input stream, one for each axis
+        ei_dsp_config_1022358_31_axes_size, // number of axes
+        1, // version
+        flatten_class::create, // factory function
+        &ei_data_normalization_config_1022358_31, // data normalization config
     }
 };
-const ei_config_tflite_eon_graph_t ei_config_graph_1022358_14 = {
+const ei_config_tflite_eon_graph_t ei_config_graph_1022358_32 = {
     .implementation_version = 1,
-    .model_init = &tflite_learn_1022358_14_init,
-    .model_invoke = &tflite_learn_1022358_14_invoke,
-    .model_reset = &tflite_learn_1022358_14_reset,
-    .model_input = &tflite_learn_1022358_14_input,
-    .model_output = &tflite_learn_1022358_14_output,
+    .model_init = &tflite_learn_1022358_32_init,
+    .model_invoke = &tflite_learn_1022358_32_invoke,
+    .model_reset = &tflite_learn_1022358_32_reset,
+    .model_input = &tflite_learn_1022358_32_input,
+    .model_output = &tflite_learn_1022358_32_output,
 };
 
-const uint8_t ei_output_tensors_indices_1022358_14[1] = { 0 };
-const uint8_t ei_output_tensors_size_1022358_14 = 1;
-ei_learning_block_config_tflite_graph_t ei_learning_block_config_1022358_14 = {
+const uint8_t ei_output_tensors_indices_1022358_32[1] = { 0 };
+const uint8_t ei_output_tensors_size_1022358_32 = 1;
+ei_learning_block_config_tflite_graph_t ei_learning_block_config_1022358_32 = {
     .implementation_version = 1,
-    .block_id = 14,
-    .output_tensors_indices = ei_output_tensors_indices_1022358_14,
-    .output_tensors_size = ei_output_tensors_size_1022358_14,
+    .block_id = 32,
+    .output_tensors_indices = ei_output_tensors_indices_1022358_32,
+    .output_tensors_size = ei_output_tensors_size_1022358_32,
     .quantized = 1,
     .compiled = 1,
-    .graph_config = (void*)&ei_config_graph_1022358_14,
+    .graph_config = (void*)&ei_config_graph_1022358_32,
     .dequantize_output = 0,
 };
 
-const ei_learning_block_config_anomaly_kmeans_t ei_learning_block_config_1022358_15 = {
-    .implementation_version = 1,
-    .block_id = 15,
-    .anom_axis = ei_classifier_anom_axes_1022358_15,
-    .anom_axes_size = 6,
-    .anom_clusters = ei_classifier_anom_clusters_1022358_15,
-    .anom_cluster_count = 32,
-    .anom_scale = ei_classifier_anom_scale_1022358_15,
-    .anom_mean = ei_classifier_anom_mean_1022358_15,
-};
-
-const uint8_t ei_learning_blocks_1022358_1_size = 2;
-const uint32_t ei_learning_block_1022358_14_inputs[2] = { 12,13 };
-const uint8_t ei_learning_block_1022358_14_inputs_size = 2;
-const uint32_t ei_learning_block_1022358_15_inputs[2] = { 12,13 };
-const uint8_t ei_learning_block_1022358_15_inputs_size = 2;
-const ei_learning_block_t ei_learning_blocks_1022358_1[ei_learning_blocks_1022358_1_size] = {
+const uint8_t ei_learning_blocks_1022358_4_size = 1;
+const uint32_t ei_learning_block_1022358_32_inputs[3] = { 27,28,31 };
+const uint8_t ei_learning_block_1022358_32_inputs_size = 3;
+const ei_learning_block_t ei_learning_blocks_1022358_4[ei_learning_blocks_1022358_4_size] = {
     {
-        14,
+        32,
         &run_nn_inference,
-        (void*)&ei_learning_block_config_1022358_14,
+        (void*)&ei_learning_block_config_1022358_32,
         EI_CLASSIFIER_IMAGE_SCALING_NONE,
-        ei_learning_block_1022358_14_inputs,
-        ei_learning_block_1022358_14_inputs_size,
-    },
-    {
-        15,
-        &run_kmeans_anomaly,
-        (void*)&ei_learning_block_config_1022358_15,
-        EI_CLASSIFIER_IMAGE_SCALING_NONE,
-        ei_learning_block_1022358_15_inputs,
-        ei_learning_block_1022358_15_inputs_size,
+        ei_learning_block_1022358_32_inputs,
+        ei_learning_block_1022358_32_inputs_size,
     },
 };
 
-ei_fill_result_classification_i8_config_t ei_fill_result_classification_i8_config_1022358_14 = {
+ei_fill_result_classification_i8_config_t ei_fill_result_classification_i8_config_1022358_32 = {
     .zero_point = -128,
     .scale = 0.00390625
 };
 
-const size_t ei_postprocessing_blocks_1022358_1_size = 1;
-const ei_postprocessing_block_t ei_postprocessing_blocks_1022358_1[ei_postprocessing_blocks_1022358_1_size] = {
+const size_t ei_postprocessing_blocks_1022358_4_size = 1;
+const ei_postprocessing_block_t ei_postprocessing_blocks_1022358_4[ei_postprocessing_blocks_1022358_4_size] = {
     {
-        .block_id = 14,
+        .block_id = 32,
         .type = EI_CLASSIFIER_MODE_CLASSIFICATION,
         .init_fn = NULL,
         .deinit_fn = NULL,
         .postprocess_fn = &process_classification_i8,
         .display_fn = NULL,
-        .config = (void*)&ei_fill_result_classification_i8_config_1022358_14,
-        .input_block_id = 14
+        .config = (void*)&ei_fill_result_classification_i8_config_1022358_32,
+        .input_block_id = 32
     },
 };
 
-const uint8_t freeform_outputs_1022358_1_size = 0;
+const uint8_t freeform_outputs_1022358_4_size = 0;
 
-uint32_t *freeform_outputs_1022358_1 = nullptr;
+uint32_t *freeform_outputs_1022358_4 = nullptr;
 
-const ei_impulse_t impulse_1022358_1 = {
+const ei_impulse_t impulse_1022358_4 = {
     .project_id = 1022358,
     .project_owner = "tomasvenda",
     .project_name = "Bracelet Fall Detection",
-    .impulse_id = 1,
-    .impulse_name = "Impulse #1",
-    .deploy_version = 2,
+    .impulse_id = 4,
+    .impulse_name = "Impulse #4",
+    .deploy_version = 4,
 
-    .nn_input_frame_size = 88,
-    .raw_sample_count = 150,
-    .raw_samples_per_frame = 4,
-    .dsp_input_frame_size = 150 * 4,
+    .nn_input_frame_size = 89,
+    .raw_sample_count = 225,
+    .raw_samples_per_frame = 5,
+    .dsp_input_frame_size = 225 * 5,
     .input_width = 0,
     .input_height = 0,
     .input_frames = 0,
     .interval_ms = 20,
     .frequency = 50,
 
-    .dsp_blocks_size = ei_dsp_blocks_1022358_1_size,
-    .dsp_blocks = ei_dsp_blocks_1022358_1,
+    .dsp_blocks_size = ei_dsp_blocks_1022358_4_size,
+    .dsp_blocks = ei_dsp_blocks_1022358_4,
 
-    .learning_blocks_size = ei_learning_blocks_1022358_1_size,
-    .learning_blocks = ei_learning_blocks_1022358_1,
+    .learning_blocks_size = ei_learning_blocks_1022358_4_size,
+    .learning_blocks = ei_learning_blocks_1022358_4,
 
-    .postprocessing_blocks_size = ei_postprocessing_blocks_1022358_1_size,
-    .postprocessing_blocks = ei_postprocessing_blocks_1022358_1,
+    .postprocessing_blocks_size = ei_postprocessing_blocks_1022358_4_size,
+    .postprocessing_blocks = ei_postprocessing_blocks_1022358_4,
 
     .output_tensors_size = 1,
 
     .inferencing_engine = EI_CLASSIFIER_TFLITE,
 
     .sensor = EI_CLASSIFIER_SENSOR_FUSION,
-    .fusion_string = "acc_x + acc_y + acc_z + pressure_delta",
-    .slice_size = (150/4),
+    .fusion_string = "acc_x + acc_y + acc_z + pressure_delta + press_step",
+    .slice_size = (225/4),
     .slices_per_model_window = 4,
 
-    .has_anomaly = EI_ANOMALY_TYPE_KMEANS,
+    .has_anomaly = EI_ANOMALY_TYPE_UNKNOWN,
     .label_count = 2,
-    .categories = ei_classifier_inferencing_categories_1022358_1,
+    .categories = ei_classifier_inferencing_categories_1022358_4,
     .results_type = EI_CLASSIFIER_TYPE_CLASSIFICATION,
-    .freeform_outputs_size = freeform_outputs_1022358_1_size,
-    .freeform_outputs = freeform_outputs_1022358_1
+    .freeform_outputs_size = freeform_outputs_1022358_4_size,
+    .freeform_outputs = freeform_outputs_1022358_4
 };
 
-ei_impulse_handle_t impulse_handle_1022358_1 = ei_impulse_handle_t( &impulse_1022358_1 );
+ei_impulse_handle_t impulse_handle_1022358_4 = ei_impulse_handle_t( &impulse_1022358_4 );
 
-ei_impulse_handle_t& ei_default_impulse = impulse_handle_1022358_1;
-constexpr auto& ei_classifier_inferencing_categories = ei_classifier_inferencing_categories_1022358_1;
-const auto ei_dsp_blocks_size = ei_dsp_blocks_1022358_1_size;
-ei_model_dsp_t *ei_dsp_blocks = ei_dsp_blocks_1022358_1;
+ei_impulse_handle_t& ei_default_impulse = impulse_handle_1022358_4;
+constexpr auto& ei_classifier_inferencing_categories = ei_classifier_inferencing_categories_1022358_4;
+const auto ei_dsp_blocks_size = ei_dsp_blocks_1022358_4_size;
+ei_model_dsp_t *ei_dsp_blocks = ei_dsp_blocks_1022358_4;
 #endif // _EI_CLASSIFIER_MODEL_VARIABLES_H_

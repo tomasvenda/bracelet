@@ -74,11 +74,28 @@ static uint32_t press_start_time;
 #define ICP20100_REG_DUMMY       0x00
 #define ICP20100_FIFO_LEVEL_MASK 0x1F
 #define ICP20100_CMD_FIFO_FLUSH  0x80
+#define ICP20100_REG_FIFO_BASE_PONLY 0xFD   
+#define ICP20100_FIFO_READOUT_PONLY  0x03  
 
 #define HALF_WINDOW_BYTES   450
 #define HALF_WINDOW_SAMPLES 75
 #define FULL_WINDOW_SAMPLES (HALF_WINDOW_SAMPLES * 2)
 #define MODEL_AXES          4
+
+/* Inference window == the EXACT training pipeline: 225 frames @ 50 Hz
+ * (1.5 s pre + 3.0 s post), 5 channels [ax, ay, az, dp, press_step]. */
+#define INFER_PAST   75
+#define INFER_FUTURE 150
+#define INFER_TOTAL  225
+#define INFER_AXES   5
+
+#define BARO_ODR_HZ        25.0f
+#define BARO_RING_SAMPLES  128
+
+#define PSTEP_HEAD_LO 10
+#define PSTEP_HEAD_HI 65
+#define PSTEP_TAIL_LO 150
+#define PSTEP_TAIL_HI 225
 
 /* ======================================================================
  * MODULE STATE
@@ -94,14 +111,18 @@ static atomic_t sensors_ready = ATOMIC_INIT(0);
 static atomic_t capture_pending = ATOMIC_INIT(0);
 
 static uint8_t bmi_fifo_buffer[HALF_WINDOW_BYTES];
-static uint8_t icp_fifo_buffer[16 * 6];
+static uint8_t icp_fifo_buffer[16 * 3];
 
 struct sensor_record {
-    double x, y, z;
-    double p_hpa;
+    float x, y, z;
+    float p_hpa;
     bool press_valid;
 };
-static struct sensor_record event_payload[FULL_WINDOW_SAMPLES];
+
+static struct sensor_record event_payload[INFER_TOTAL];
+static float    baro_ring[BARO_RING_SAMPLES];
+static uint16_t baro_ring_head, baro_ring_count;
+static K_MUTEX_DEFINE(baro_ring_lock);
 
 /* Bosch API glue -- implemented in bmi270_legacy_api (same as before) */
 BMI2_INTF_RETURN_TYPE bmi2_i2c_read(uint8_t reg_addr, uint8_t *data, uint32_t len, void *intf_ptr);
@@ -306,16 +327,16 @@ static uint16_t read_pressure_fifo(float *out_pressure, uint16_t max_samples)
     if (count == 0) return 0;
     if (count > max_samples) count = max_samples;
 
-    if (i2c_burst_read_dt(&icp_i2c, ICP20100_REG_FIFO_BASE, icp_fifo_buffer, count * 6)) return 0;
+    if (i2c_burst_read_dt(&icp_i2c, ICP20100_REG_FIFO_BASE_PONLY, icp_fifo_buffer, count * 3)) return 0;
 
     uint8_t dummy;
     i2c_reg_read_byte_dt(&icp_i2c, ICP20100_REG_DUMMY, &dummy);
 
     for (int i = 0; i < count; i++) {
-        uint8_t *pkt = &icp_fifo_buffer[i * 6];
+        uint8_t *pkt = &icp_fifo_buffer[i * 3];
         int32_t raw = ((int32_t)(pkt[2] & 0x0f) << 16) | ((int32_t)pkt[1] << 8) | pkt[0];
         if (raw & 0x080000) raw |= 0xFFF00000;
-        out_pressure[i] = ((float)raw * 40.0f / 131072.0f) + 70.0f;
+        out_pressure[i] = ((float)raw * 40.0f / 131072.0f) + 70.0f;   /* kPa */
     }
     return count;
 }
@@ -342,107 +363,6 @@ static int configure_bmi_fifo(void)
     return i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
 }
 
-static uint16_t read_bmi_half_window(struct sensor_record *out_buf,
-                                     uint16_t write_offset, const char *label)
-{
-    uint8_t len_buf[2];
-    if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_LENGTH_0, len_buf, 2)) {
-        LOG_ERR("[%s] FIFO length read failed", label);
-        return 0;
-    }
-
-    uint16_t fifo_len = len_buf[0] | ((len_buf[1] & 0x1F) << 8);
-    uint16_t total_bytes = (fifo_len / 6) * 6;
-    if (total_bytes == 0) {
-        LOG_WRN("[%s] FIFO empty.", label);
-        return 0;
-    }
-
-    if (total_bytes > HALF_WINDOW_BYTES) {
-        uint16_t discard = total_bytes - HALF_WINDOW_BYTES;
-        uint8_t trash[64];
-        while (discard > 0) {
-            uint16_t chunk = (discard > sizeof(trash)) ? sizeof(trash) : discard;
-            if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, trash, chunk)) return 0;
-            discard -= chunk;
-        }
-    }
-
-    uint16_t keep = (total_bytes > HALF_WINDOW_BYTES) ? HALF_WINDOW_BYTES : total_bytes;
-    if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, bmi_fifo_buffer, keep)) return 0;
-
-    uint16_t n = keep / 6;
-    if ((write_offset + n) > FULL_WINDOW_SAMPLES) {
-        n = FULL_WINDOW_SAMPLES - write_offset;
-    }
-
-    for (uint16_t i = 0; i < n; i++) {
-        int16_t rx = (int16_t)((bmi_fifo_buffer[i*6+1] << 8) | bmi_fifo_buffer[i*6+0]);
-        int16_t ry = (int16_t)((bmi_fifo_buffer[i*6+3] << 8) | bmi_fifo_buffer[i*6+2]);
-        int16_t rz = (int16_t)((bmi_fifo_buffer[i*6+5] << 8) | bmi_fifo_buffer[i*6+4]);
-        out_buf[write_offset+i].x = rx / 16384.0;
-        out_buf[write_offset+i].y = ry / 16384.0;
-        out_buf[write_offset+i].z = rz / 16384.0;
-    }
-
-    LOG_INF("[%s] Wrote %d samples (indices %d..%d)", label, n,
-            write_offset, write_offset + n - 1);
-    return n;
-}
-
-/* ======================================================================
- * PRESSURE ALIGNMENT (from the logger; baseline subtraction ENABLED --
- * the model was trained on delta-from-first-sample)
- * ====================================================================== */
-static void align_and_pad_pressure(float *past_p, uint16_t past_n,
-                                   float *future_p, uint16_t future_n)
-{
-    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) event_payload[i].press_valid = false;
-
-    int idx = HALF_WINDOW_SAMPLES - 1 - ((past_n - 1) * 2);
-    if (idx < 0) idx = 0;
-    for (int i = 0; i < past_n; i++) {
-        if (idx >= HALF_WINDOW_SAMPLES) break;
-        event_payload[idx].p_hpa = past_p[i] * 10.0f;
-        event_payload[idx].press_valid = true;
-        idx += 2;
-    }
-
-    idx = FULL_WINDOW_SAMPLES - 1 - ((future_n - 1) * 2);
-    if (idx < HALF_WINDOW_SAMPLES) idx = HALF_WINDOW_SAMPLES;
-    for (int i = 0; i < future_n; i++) {
-        if (idx >= FULL_WINDOW_SAMPLES) break;
-        event_payload[idx].p_hpa = future_p[i] * 10.0f;
-        event_payload[idx].press_valid = true;
-        idx += 2;
-    }
-
-    double last_p = past_n > 0 ? ((double)past_p[0] * 10.0) : 1013.25;
-    bool has_p = false;
-    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
-        if (event_payload[i].press_valid) {
-            last_p = event_payload[i].p_hpa; has_p = true;
-        } else if (has_p) {
-            event_payload[i].p_hpa = last_p;
-            event_payload[i].press_valid = true;
-        }
-    }
-    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
-        if (event_payload[i].press_valid) { last_p = event_payload[i].p_hpa; break; }
-    }
-    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
-        if (!event_payload[i].press_valid) {
-            event_payload[i].p_hpa = last_p;
-            event_payload[i].press_valid = true;
-        } else break;
-    }
-
-    double baseline = event_payload[0].p_hpa;
-    for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
-        event_payload[i].p_hpa -= baseline;
-    }
-}
-
 /* ======================================================================
  * LATCHED-INT-SAFE REARM (from the logger)
  * ====================================================================== */
@@ -466,58 +386,169 @@ static void rearm_bmi_interrupt(void)
 /* ======================================================================
  * PUBLIC: FALL-WINDOW CAPTURE (called from the FSM's evaluation k_work)
  * ====================================================================== */
+
+/* --- Pressure ring buffer (hPa) ---------------------------------------- */
+static void baro_ring_push(float p_hpa)
+{
+    baro_ring[baro_ring_head] = p_hpa;
+    baro_ring_head = (baro_ring_head + 1) % BARO_RING_SAMPLES;
+    if (baro_ring_count < BARO_RING_SAMPLES) baro_ring_count++;
+}
+
+static void baro_drain_to_ring(void)
+{
+    float tmp[16];
+    uint16_t n = read_pressure_fifo(tmp, 16);           
+    if (n == 0) return;
+    k_mutex_lock(&baro_ring_lock, K_FOREVER);
+    for (uint16_t i = 0; i < n; i++) baro_ring_push(tmp[i] * 10.0f);  
+    k_mutex_unlock(&baro_ring_lock);
+}
+
+static uint16_t baro_ring_snapshot(float *out, uint16_t want)
+{
+    k_mutex_lock(&baro_ring_lock, K_FOREVER);
+    uint16_t n = (baro_ring_count < want) ? baro_ring_count : want;
+    uint16_t idx = (baro_ring_head + BARO_RING_SAMPLES - n) % BARO_RING_SAMPLES;
+    for (uint16_t i = 0; i < n; i++) { out[i] = baro_ring[idx]; idx = (idx + 1) % BARO_RING_SAMPLES; }
+    k_mutex_unlock(&baro_ring_lock);
+    return n;
+}
+
+static void baro_ring_reset(void)
+{
+    k_mutex_lock(&baro_ring_lock, K_FOREVER);
+    baro_ring_head = 0; baro_ring_count = 0;
+    k_mutex_unlock(&baro_ring_lock);
+}
+
+static uint16_t read_bmi_frames(struct sensor_record *out, uint16_t off,
+                                uint16_t want_frames, const char *label)
+{
+    uint8_t len_buf[2];
+    if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_LENGTH_0, len_buf, 2)) return 0;
+    uint16_t total = ((len_buf[0] | ((len_buf[1] & 0x1F) << 8)) / 6) * 6;
+    uint16_t want  = want_frames * 6;
+
+    if (total > want) {
+        uint16_t discard = total - want;
+        uint8_t trash[64];
+        while (discard) {
+            uint16_t c = MIN(discard, sizeof(trash));
+            if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, trash, c)) return 0;
+            discard -= c;
+        }
+        total = want;
+    }
+    uint16_t done = 0;
+    while (done < total) {
+        uint16_t c = MIN(total - done, (uint16_t)sizeof(bmi_fifo_buffer));
+        if (i2c_burst_read_dt(&bmi_i2c, BMI270_REG_FIFO_DATA, bmi_fifo_buffer, c)) break;
+        for (uint16_t i = 0; i < c / 6; i++) {
+            uint16_t k = off + done / 6 + i;
+            if (k >= INFER_TOTAL) break;
+            out[k].x = (int16_t)((bmi_fifo_buffer[i*6+1] << 8) | bmi_fifo_buffer[i*6+0]) / 16384.0;
+            out[k].y = (int16_t)((bmi_fifo_buffer[i*6+3] << 8) | bmi_fifo_buffer[i*6+2]) / 16384.0;
+            out[k].z = (int16_t)((bmi_fifo_buffer[i*6+5] << 8) | bmi_fifo_buffer[i*6+4]) / 16384.0;
+        }
+        done += c;
+    }
+    LOG_INF("[%s] %u frames", label, done / 6);
+    return done / 6;
+}
+
+static void interpolate_pressure_to_accel(const float *press, int m, float f_baro,
+                                          struct sensor_record *rec, int n)
+{
+    if (m <= 0) { for (int i=0;i<n;i++){ rec[i].p_hpa=0.0; rec[i].press_valid=false; } return; }
+    if (m == 1) { for (int i=0;i<n;i++){ rec[i].p_hpa=press[0]; rec[i].press_valid=true; } return; }
+    const double dt_acc = 1.0/50.0, dt_press = 1.0/(double)f_baro;
+    for (int i = 0; i < n; i++) {
+        double t  = (double)(i-(n-1))*dt_acc;
+        double fj = (double)(m-1) + t/dt_press;
+        if      (fj <= 0.0)           rec[i].p_hpa = press[0];
+        else if (fj >= (double)(m-1)) rec[i].p_hpa = press[m-1];
+        else { int j=(int)fj; double f=fj-j; rec[i].p_hpa = press[j] + f*(press[j+1]-press[j]); }
+        rec[i].press_valid = true;
+    }
+}
+
+static double median_range(int lo, int hi)
+{
+    static double tmp[INFER_TOTAL];
+    int n = 0;
+    for (int i = lo; i < hi && i < INFER_TOTAL; i++) tmp[n++] = event_payload[i].p_hpa;
+    if (n == 0) return 0.0;
+    for (int i = 1; i < n; i++) { double v=tmp[i]; int j=i-1;
+        while (j>=0 && tmp[j]>v){ tmp[j+1]=tmp[j]; j--; } tmp[j+1]=v; }
+    return (n & 1) ? tmp[n/2] : 0.5*(tmp[n/2-1]+tmp[n/2]);
+}
+
 int sensors_capture_fall_window(float *features, size_t count)
 {
-    float past_p[16], future_p[16];
+    float past_p[64], future_p[96];
 
-    if (count != FULL_WINDOW_SAMPLES * MODEL_AXES) {
+    if (count != INFER_TOTAL * INFER_AXES) {           
         LOG_ERR("Capture buffer is %u floats, need %u",
-                (unsigned)count, FULL_WINDOW_SAMPLES * MODEL_AXES);
+                (unsigned)count, INFER_TOTAL * INFER_AXES);
         return -EINVAL;
     }
 
-    /* Mask INT1 while we're busy for several seconds */
     gpio_pin_interrupt_configure_dt(&bmi_int, GPIO_INT_DISABLE);
-
     memset(event_payload, 0, sizeof(event_payload));
     LOG_INF("=== FALL WINDOW CAPTURE (t=%lld) ===", k_uptime_get());
 
-    uint16_t past_acc_n   = read_bmi_half_window(event_payload, 0, "PAST");
-    uint16_t past_press_n = read_pressure_fifo(past_p, 16);
+    uint16_t past_acc_n = read_bmi_frames(event_payload, 0, INFER_PAST, "PAST");
+    baro_drain_to_ring();
+    uint16_t past_press_n = baro_ring_snapshot(past_p, 40);
 
     i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
     flush_pressure_fifo();
 
-    k_sleep(K_MSEC(1650));
-
-    uint16_t future_acc_n = read_bmi_half_window(event_payload, HALF_WINDOW_SAMPLES, "FUTURE");
+    uint16_t future_press_n = 0;
+    for (int c = 0; c < 6; c++) {                       
+        k_sleep(K_MSEC(510));
+        uint16_t got = read_pressure_fifo(&future_p[future_press_n],
+                                          ARRAY_SIZE(future_p) - future_press_n);
+        for (uint16_t i = 0; i < got; i++) future_p[future_press_n + i] *= 10.0f;
+        future_press_n += got;
+    }
+    uint16_t future_acc_n = read_bmi_frames(event_payload, INFER_PAST, INFER_FUTURE, "FUTURE");
     bmi2_set_adv_power_save(BMI2_DISABLE, &bmi_dev_ctx);
-    uint16_t future_press_n = read_pressure_fifo(future_p, 16);
 
-    LOG_INF("Captured: past_acc=%d/75 future_acc=%d/75 past_p=%d future_p=%d",
-            past_acc_n, future_acc_n, past_press_n, future_press_n);
+    LOG_INF("acc %u/%u + %u/%u, press %u + %u",
+            past_acc_n, INFER_PAST, future_acc_n, INFER_FUTURE, past_press_n, future_press_n);
 
     int ret = 0;
-    if ((past_acc_n + future_acc_n) == FULL_WINDOW_SAMPLES) {
-        align_and_pad_pressure(past_p, past_press_n, future_p, future_press_n);
-        for (int i = 0; i < FULL_WINDOW_SAMPLES; i++) {
-            features[i * MODEL_AXES + 0] = (float)event_payload[i].x;
-            features[i * MODEL_AXES + 1] = (float)event_payload[i].y;
-            features[i * MODEL_AXES + 2] = (float)event_payload[i].z;
-            features[i * MODEL_AXES + 3] = (float)event_payload[i].p_hpa;
+    if (past_acc_n == INFER_PAST && future_acc_n == INFER_FUTURE) {
+        interpolate_pressure_to_accel(past_p, past_press_n, BARO_ODR_HZ,
+                                      &event_payload[0], INFER_PAST);
+        interpolate_pressure_to_accel(future_p, future_press_n, BARO_ODR_HZ,
+                                      &event_payload[INFER_PAST], INFER_FUTURE);
+
+        double p0   = event_payload[0].p_hpa;
+        float  step = (float)(median_range(PSTEP_TAIL_LO, PSTEP_TAIL_HI) -
+                              median_range(PSTEP_HEAD_LO, PSTEP_HEAD_HI));
+
+        for (int i = 0; i < INFER_TOTAL; i++) {
+            features[i*INFER_AXES + 0] = (float)event_payload[i].x;
+            features[i*INFER_AXES + 1] = (float)event_payload[i].y;
+            features[i*INFER_AXES + 2] = (float)event_payload[i].z;
+            features[i*INFER_AXES + 3] = (float)(event_payload[i].p_hpa - p0);  
+            features[i*INFER_AXES + 4] = step;                                  
         }
+        LOG_INF("press_step = %.4f hPa", (double)step);
     } else {
         LOG_WRN("FIFO read short -- discarding event.");
         ret = -EIO;
     }
 
-    /* Clean state, refill, rearm */
     i2c_reg_write_byte_dt(&bmi_i2c, BMI270_REG_CMD, BMI270_CMD_FIFO_FLUSH);
     flush_pressure_fifo();
+    baro_ring_reset();
     LOG_INF("Refilling FIFOs (1.6s)...");
     k_sleep(K_MSEC(1600));
     rearm_bmi_interrupt();
-
     return ret;
 }
 
@@ -557,9 +588,9 @@ static void sensor_thread_fn(void *a, void *b, void *c)
     struct bracelet_event event;
 
     while (1) {
-        if (k_sem_take(&bmi_irq_sem, K_MSEC(600)) != 0) {
+        if (k_sem_take(&bmi_irq_sem, K_MSEC(400)) != 0) {
             if (atomic_get(&sensors_ready) && !atomic_get(&capture_pending)) {
-                flush_pressure_fifo();
+                baro_drain_to_ring();
             }
             continue;
         }
@@ -593,7 +624,7 @@ static void sensor_thread_fn(void *a, void *b, void *c)
         }
     }
 }
-K_THREAD_DEFINE(sensor_tid, 2048, sensor_thread_fn, NULL, NULL, NULL,
+K_THREAD_DEFINE(sensor_tid, 4096, sensor_thread_fn, NULL, NULL, NULL,
                 K_PRIO_PREEMPT(6), 0, 0);
 
 /* ======================================================================
@@ -643,8 +674,8 @@ int sensors_init(void)
     }
 
     /* -- ICP-20100: 25 Hz continuous + warm-up discard -- */
-    LOG_INF("[SENSORS] Configuring ICP-20100 (25Hz, 1.2s warm-up)...");
-    i2c_reg_write_byte_dt(&icp_i2c, ICP20100_REG_MODE_SELECT, 0x08);
+    LOG_INF("[SENSORS] Configuring ICP-20100 (25Hz, pressure-only FIFO)...");
+    i2c_reg_write_byte_dt(&icp_i2c, ICP20100_REG_MODE_SELECT, 0x08 | ICP20100_FIFO_READOUT_PONLY);
     k_sleep(K_MSEC(1200));
     flush_pressure_fifo();
 

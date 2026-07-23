@@ -8,12 +8,12 @@
 extern "C" {
 #endif
 
-/* Total floats the deployed model expects (should be 600). Use to
+/* Total floats the deployed model expects (should be 1125). Use to
  * sanity-check buffers at boot. */
 size_t ml_wrapper_input_size(void);
 
 /* Run inference on an interleaved feature window:
- *   [x0,y0,z0,dp0, x1,y1,z1,dp1, ...]
+ *   [x0,y0,z0,dp0,press_step0 x1,y1,z1,dp1,press_step1 ...]
  * Returns:
  *    1  -> classified as fall
  *    0  -> classified as anything else
