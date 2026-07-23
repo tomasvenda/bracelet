@@ -126,11 +126,15 @@ static bool perform_localization_work(void)
     k_event_clear(&app_events, WIFI_EVT_SUCCESS | WIFI_EVT_FAIL | LOC_EVT_VERDICT);
 
     /* STEP 1: WI-FI */
-    LOG_INF("Taking MQTT/LTE offline for Wi-Fi Scan.");
-    comms_mqtt_disconnect();
-    comms_lte_sleep();
 
-    k_sleep(K_MSEC(1000));
+    // Only needed if using LTE antena booster and not external one
+    //LOG_INF("Taking MQTT/LTE offline for Wi-Fi Scan.");
+    //comms_mqtt_disconnect();
+    //comms_lte_sleep();
+    //k_sleep(K_MSEC(1000));
+
+    // Wi-Fi and LTE can function at the same time because we use an external antenna 
+    LOG_INF("Starting Wi-Fi Scan (with LTE still connected)");
 
     /* Enable LDO1 before bringing up Wi-Fi */
     if (device_is_ready(ldo1_dev)) {
@@ -151,7 +155,8 @@ static bool perform_localization_work(void)
         regulator_disable(ldo1_dev);
     }
 
-    comms_lte_wake();
+    // Only needed if using LTE antenna booster, current hardware uses an external antena
+    //comms_lte_wake();     
 
     if (aps > 0) {
         k_event_clear(&app_events, WIFI_EVT_SUCCESS | WIFI_EVT_FAIL | LOC_EVT_VERDICT);
