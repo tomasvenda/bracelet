@@ -33,7 +33,7 @@ static const struct device *const ldo1_dev = DEVICE_DT_GET(LDO1_NODE);
 
 #define LONG_PRESS_MS 1500
 #define DEBOUNCE_MS   40
-#define BEEP_MS 60 
+#define BEEP_MS 250 
 
 static struct gpio_callback button_cb_data;
 static struct k_work_delayable button_debounce_work;
@@ -74,7 +74,7 @@ static void set_led(enum led_color color)
     current_color = color;
     LOG_INF("[LED] color -> %d", (int)color);
 
-    if (color != LED_OFF) {
+    if (color = LED_OFF) {
         short_beep();
     }
 }
