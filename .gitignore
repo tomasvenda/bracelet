@@ -36,6 +36,7 @@ final_project_tests/assisted_gnss_test
 final_project_tests/gnss_fix_power
 final_project_tests/detector_accuracy
 final_project_tests/detector_power
+final_project_tests/data_collection
 gnss/build
 lte_pcb/build
 memory/build
