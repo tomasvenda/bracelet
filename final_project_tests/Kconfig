@@ -46,4 +46,8 @@ config APP_GNSS_TEST_ASSISTED
     depends on APP_GNSS_POWER_TEST
     default n
 
+config APP_COLLECT_DATA
+    bool "Fall data collection build"
+    default n
+
 endmenu
