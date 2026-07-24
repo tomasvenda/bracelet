@@ -10,7 +10,6 @@
 
 #include "ml_wrapper.h"
 
-/* IMPORTANT: must match the class name in your Edge Impulse project exactly */
 #define FALL_LABEL "fall"
 #define FALL_CONFIDENCE_THRESHOLD 0.75f /* Require 75% confidence to trigger */
 #define FALL_ANOMALY_MAX          0.30f /* Reject if anomaly score is above this */
@@ -37,7 +36,7 @@ extern "C" int run_fall_inference(const float *features, size_t count)
     }
 
     ei_impulse_result_t result = { 0 };
-    EI_IMPULSE_ERROR rc = run_classifier(&signal, &result, true);  
+    EI_IMPULSE_ERROR rc = run_classifier(&signal, &result, false);  
     if (rc != EI_IMPULSE_OK) {
         printk("[ML] run_classifier failed: %d\n", (int)rc);
         return -3;
